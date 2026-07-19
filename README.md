@@ -64,18 +64,23 @@ cd wrapt
 ./install.sh          # or: make install
 ```
 
-This builds the release binary, installs it to `/usr/local/bin` (so `sudo wrapt`
-works), and installs shell completions for bash, zsh, and fish into their system
-directories — no shell-config editing required. Open a new shell afterwards for
-completions to take effect.
+This builds a `.deb` and installs it with `apt`, so wrapt becomes a normal
+dpkg-managed package at `/usr/bin/wrapt` — the same path `wrapt self-update`
+uses. Keeping a single, canonical copy means updates never leave an older binary
+behind to shadow the new one. Completions (bash, zsh, fish) and the man page come
+from the package; open a new shell for completions to take effect. If an earlier
+copy-method install left a `wrapt` in `/usr/local/bin`, the installer removes it
+so it can't shadow the packaged copy.
 
-To install elsewhere without root, set a prefix:
+For a rootless install (or a system without dpkg/apt), install by copying files
+instead:
 
 ```bash
-PREFIX=~/.local ./install.sh
+./install.sh --copy          # copy into /usr/local
+PREFIX=~/.local ./install.sh # copy somewhere else, no root needed
 ```
 
-Remove everything with `./install.sh --uninstall`.
+Remove everything — package or copied files — with `./install.sh --uninstall`.
 
 ### Prebuilt `.deb` packages
 
