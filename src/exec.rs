@@ -55,14 +55,25 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
     cmd.env("LC_ALL", "C")
         // readline is line-oriented, so a prompt cooperates with our display;
         // the fullscreen dialog frontend would fight the progress bar.
-        .env("DEBIAN_FRONTEND", if interactive { "readline" } else { "noninteractive" })
+        .env(
+            "DEBIAN_FRONTEND",
+            if interactive {
+                "readline"
+            } else {
+                "noninteractive"
+            },
+        )
         .arg("-y")
         .args(["-o", "APT::Status-Fd=3"])
         // Don't let dpkg allocate a terminal and write past our capture.
         .args(["-o", "Dpkg::Use-Pty=0"])
         .args(args)
         // Inherit the terminal when interactive so the user can answer prompts.
-        .stdin(if interactive { Stdio::inherit() } else { Stdio::null() })
+        .stdin(if interactive {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     unsafe {
@@ -94,9 +105,24 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
     bar.set_message("Preparing...");
 
     let mut sources = [
-        Source { fd: status_file.as_raw_fd(), kind: Kind::Status, buf: Vec::new(), eof: false },
-        Source { fd: stdout.as_raw_fd(), kind: Kind::Stdout, buf: Vec::new(), eof: false },
-        Source { fd: stderr.as_raw_fd(), kind: Kind::Stderr, buf: Vec::new(), eof: false },
+        Source {
+            fd: status_file.as_raw_fd(),
+            kind: Kind::Status,
+            buf: Vec::new(),
+            eof: false,
+        },
+        Source {
+            fd: stdout.as_raw_fd(),
+            kind: Kind::Stdout,
+            buf: Vec::new(),
+            eof: false,
+        },
+        Source {
+            fd: stderr.as_raw_fd(),
+            kind: Kind::Stderr,
+            buf: Vec::new(),
+            eof: false,
+        },
     ];
     for s in &sources {
         set_nonblocking(s.fd)?;
@@ -115,7 +141,11 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
         let mut pfds: Vec<libc::pollfd> = sources
             .iter()
             .filter(|s| !s.eof)
-            .map(|s| libc::pollfd { fd: s.fd, events: libc::POLLIN, revents: 0 })
+            .map(|s| libc::pollfd {
+                fd: s.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
             .collect();
         if pfds.is_empty() {
             break;
@@ -139,9 +169,7 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
         for src in &mut sources {
             for line in take_lines(&mut src.buf) {
                 match src.kind {
-                    Kind::Status => {
-                        handle_status(&line, &bar, &mut done, &mut new_conffiles)
-                    }
+                    Kind::Status => handle_status(&line, &bar, &mut done, &mut new_conffiles),
                     Kind::Stdout => {
                         if revealing {
                             bar.suspend(|| println!("{line}"));
@@ -265,11 +293,11 @@ fn handle_status(
                     let name = strip_arch(name);
                     bar.suspend(|| println!("  {} {}", "✓".green().bold(), name));
                 }
-            } else if let Some(name) = msg.strip_prefix("Removed ") {
-                if done.insert(pkg.to_string()) {
-                    let name = strip_arch(name);
-                    bar.suspend(|| println!("  {} {}", "-".red().bold(), name));
-                }
+            } else if let Some(name) = msg.strip_prefix("Removed ")
+                && done.insert(pkg.to_string())
+            {
+                let name = strip_arch(name);
+                bar.suspend(|| println!("  {} {}", "-".red().bold(), name));
             }
         }
         "pmerror" => {
@@ -300,7 +328,10 @@ fn looks_like_prompt(buf: &str) -> bool {
         return false;
     }
     // Explicit yes/no or default-answer markers.
-    if t.contains("[Y/n]") || t.contains("[y/N]") || t.contains("[yes/no]") || t.contains("[default=")
+    if t.contains("[Y/n]")
+        || t.contains("[y/N]")
+        || t.contains("[yes/no]")
+        || t.contains("[default=")
     {
         return true;
     }

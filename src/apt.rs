@@ -107,14 +107,24 @@ pub fn simulate(args: &[String]) -> Result<Transaction> {
                 // The origin token(s) name the archive/suite, e.g.
                 // "Ubuntu:26.04/resolute-security"; scan them for "-security".
                 let security = rest[idx..].iter().any(|t| t.contains("-security"));
-                tx.install.push(Change { name, old, new, security });
+                tx.install.push(Change {
+                    name,
+                    old,
+                    new,
+                    security,
+                });
             }
             Some("Remv") => {
                 let name = tokens.next().unwrap_or_default().to_string();
-                let old = tokens.next().map(|v| {
-                    v.trim_start_matches('[').trim_end_matches(']').to_string()
+                let old = tokens
+                    .next()
+                    .map(|v| v.trim_start_matches('[').trim_end_matches(']').to_string());
+                tx.remove.push(Change {
+                    name,
+                    old,
+                    new: None,
+                    security: false,
                 });
-                tx.remove.push(Change { name, old, new: None, security: false });
             }
             _ => {}
         }
@@ -159,15 +169,14 @@ pub fn disk_usage(tx: &Transaction) -> Option<DiskUsage> {
         .map(|c| c.name.as_str())
         .collect();
     let mut old_size = 0u64;
-    if !old_names.is_empty() {
-        if let Ok(out) = Command::new("dpkg-query")
+    if !old_names.is_empty()
+        && let Ok(out) = Command::new("dpkg-query")
             .args(["-W", "-f", "${Installed-Size}\n"])
             .args(&old_names)
             .output()
-        {
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                old_size += line.trim().parse::<u64>().unwrap_or(0) * 1024;
-            }
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            old_size += line.trim().parse::<u64>().unwrap_or(0) * 1024;
         }
     }
 
@@ -191,8 +200,7 @@ pub fn print_uris(args: &[String]) -> Result<Vec<DownloadItem>> {
     let mut items = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let mut tokens = line.split_whitespace();
-        let (Some(url), Some(filename), Some(size)) =
-            (tokens.next(), tokens.next(), tokens.next())
+        let (Some(url), Some(filename), Some(size)) = (tokens.next(), tokens.next(), tokens.next())
         else {
             continue;
         };
@@ -310,7 +318,12 @@ pub fn held() -> Vec<String> {
     Command::new("apt-mark")
         .arg("showhold")
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -350,9 +363,7 @@ pub fn search(query: &str) -> Result<Vec<SearchResult>> {
         .collect();
 
     // Exact matches first, then name matches, then everything else.
-    results.sort_by_key(|r| {
-        (r.name != query, !r.name.contains(query), r.name.clone())
-    });
+    results.sort_by_key(|r| (r.name != query, !r.name.contains(query), r.name.clone()));
     Ok(results)
 }
 

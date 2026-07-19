@@ -2,14 +2,18 @@ use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
 #[derive(Parser)]
-#[command(name = "wrapt", version, about = "A faster, prettier front-end for apt")]
+#[command(
+    name = "wrapt",
+    version,
+    about = "A faster, prettier front-end for apt"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// Number of parallel downloads
-    #[arg(short = 'j', long, global = true, default_value_t = 5)]
-    pub parallel: usize,
+    /// Number of parallel downloads (default 5, or config `parallel`)
+    #[arg(short = 'j', long, global = true)]
+    pub parallel: Option<usize>,
 
     /// Show apt's raw output instead of the clean progress display
     #[arg(short, long, global = true)]
@@ -103,6 +107,8 @@ pub enum Command {
         /// Shell to generate completions for
         shell: Shell,
     },
+    /// Print the man page (roff format)
+    Man,
     /// Search for packages
     Search { query: String },
     /// Show detailed information about a package

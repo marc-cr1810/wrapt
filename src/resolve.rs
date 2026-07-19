@@ -29,7 +29,10 @@ fn hint(raw: &str, named: &[String]) -> Option<String> {
                  or run `wrapt update` if your package lists are stale."
             )
         } else {
-            format!("No package '{pkg}'. Did you mean: {}?", suggestions.join(", "))
+            format!(
+                "No package '{pkg}'. Did you mean: {}?",
+                suggestions.join(", ")
+            )
         });
     }
 
@@ -93,7 +96,12 @@ fn did_you_mean(name: &str) -> Vec<String> {
             let d = damerau(name, cand);
             (d <= 2).then(|| {
                 let diff_first = cand.bytes().next() != first;
-                (d, diff_first, cand.len().abs_diff(name.len()), cand.to_string())
+                (
+                    d,
+                    diff_first,
+                    cand.len().abs_diff(name.len()),
+                    cand.to_string(),
+                )
             })
         })
         .collect();
@@ -110,8 +118,8 @@ fn damerau(a: &str, b: &str) -> usize {
     for (i, row) in d.iter_mut().enumerate() {
         row[0] = i;
     }
-    for j in 0..=m {
-        d[0][j] = j;
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
     }
     for i in 1..=n {
         for j in 1..=m {
@@ -182,7 +190,10 @@ pub fn config_diff() -> Result<()> {
 
 /// Recursively find `*.dpkg-dist` / `*.dpkg-new` / `*.ucf-dist` files and pair
 /// each with the config file it would replace.
-fn collect_dpkg_dist(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, std::path::PathBuf)>) {
+fn collect_dpkg_dist(
+    dir: &std::path::Path,
+    out: &mut Vec<(std::path::PathBuf, std::path::PathBuf)>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

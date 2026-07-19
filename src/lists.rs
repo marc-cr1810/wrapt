@@ -45,9 +45,7 @@ pub fn search(query: &str) -> Result<Vec<SearchResult>> {
             description,
         })
         .collect();
-    results.sort_by_key(|r| {
-        (r.name != query, !r.name.contains(&query), r.name.clone())
-    });
+    results.sort_by_key(|r| (r.name != query, !r.name.contains(&query), r.name.clone()));
     Ok(results)
 }
 
@@ -155,9 +153,7 @@ fn verrevcmp(a: &str, b: &str) -> Ordering {
             j += 1;
         }
         let mut first_diff = Ordering::Equal;
-        while a.get(i).is_some_and(u8::is_ascii_digit)
-            && b.get(j).is_some_and(u8::is_ascii_digit)
-        {
+        while a.get(i).is_some_and(u8::is_ascii_digit) && b.get(j).is_some_and(u8::is_ascii_digit) {
             if first_diff == Ordering::Equal {
                 first_diff = a[i].cmp(&b[j]);
             }

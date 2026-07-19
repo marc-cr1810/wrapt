@@ -12,19 +12,18 @@ use crate::ui;
 
 pub fn run(pattern: &str) -> Result<()> {
     // 1. Is it a command already on PATH? Point at its owning package.
-    if !pattern.contains('/') {
-        if let Some(path) = which(pattern) {
-            if let Some(pkg) = dpkg_owner(&path) {
-                ui::header(pattern);
-                println!(
-                    "   {} is provided by {} {}",
-                    path.cyan(),
-                    pkg.bold().green(),
-                    "[installed]".green()
-                );
-                return Ok(());
-            }
-        }
+    if !pattern.contains('/')
+        && let Some(path) = which(pattern)
+        && let Some(pkg) = dpkg_owner(&path)
+    {
+        ui::header(pattern);
+        println!(
+            "   {} is provided by {} {}",
+            path.cyan(),
+            pkg.bold().green(),
+            "[installed]".green()
+        );
+        return Ok(());
     }
 
     // 2. Search installed packages' file lists (fast, always available).
@@ -39,7 +38,10 @@ pub fn run(pattern: &str) -> Result<()> {
                 "   {}",
                 "Only installed files were searched. For all packages, install apt-file:".dimmed()
             );
-            println!("     {}", "wrapt install apt-file && sudo apt-file update".cyan());
+            println!(
+                "     {}",
+                "wrapt install apt-file && sudo apt-file update".cyan()
+            );
         }
         return Ok(());
     }
@@ -71,7 +73,10 @@ pub fn run(pattern: &str) -> Result<()> {
         println!("     {}", file.dimmed());
     }
     if total > MAX {
-        println!("   {}", format!("… and {} more match(es)", total - MAX).dimmed());
+        println!(
+            "   {}",
+            format!("… and {} more match(es)", total - MAX).dimmed()
+        );
     }
     Ok(())
 }
@@ -91,7 +96,11 @@ fn which(cmd: &str) -> Option<String> {
 
 /// Owning package of an existing file path (`dpkg -S`).
 fn dpkg_owner(path: &str) -> Option<String> {
-    let out = Command::new("dpkg").args(["-S", path]).env("LC_ALL", "C").output().ok()?;
+    let out = Command::new("dpkg")
+        .args(["-S", path])
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -104,7 +113,11 @@ fn dpkg_owner(path: &str) -> Option<String> {
 
 /// `(package, file)` pairs from installed packages whose files match `pattern`.
 fn dpkg_search(pattern: &str) -> Vec<(String, String)> {
-    let Ok(out) = Command::new("dpkg").args(["-S", pattern]).env("LC_ALL", "C").output() else {
+    let Ok(out) = Command::new("dpkg")
+        .args(["-S", pattern])
+        .env("LC_ALL", "C")
+        .output()
+    else {
         return Vec::new();
     };
     parse_pairs(&String::from_utf8_lossy(&out.stdout))

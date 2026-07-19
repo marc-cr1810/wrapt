@@ -38,7 +38,12 @@ pub fn format_size(bytes: u64) -> String {
 /// Ask a yes/no question on the terminal.
 pub fn confirm(prompt: &str, default_yes: bool) -> bool {
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
-    print!("{} {} {} ", "::".cyan().bold(), prompt.bold(), hint.dimmed());
+    print!(
+        "{} {} {} ",
+        "::".cyan().bold(),
+        prompt.bold(),
+        hint.dimmed()
+    );
     let _ = io::stdout().flush();
     let mut answer = String::new();
     if io::stdin().read_line(&mut answer).is_err() {
@@ -84,10 +89,10 @@ fn parse_selection(input: &str, count: usize) -> Vec<usize> {
                 }
             }
             None => {
-                if let Ok(i) = token.parse::<usize>() {
-                    if (1..=count).contains(&i) {
-                        picks.insert(i);
-                    }
+                if let Ok(i) = token.parse::<usize>()
+                    && (1..=count).contains(&i)
+                {
+                    picks.insert(i);
                 }
             }
         }
@@ -95,26 +100,11 @@ fn parse_selection(input: &str, count: usize) -> Vec<usize> {
     picks.into_iter().collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_selection;
-
-    #[test]
-    fn parses_ranges_and_singles() {
-        assert_eq!(parse_selection("1 3-5 8", 10), [1, 3, 4, 5, 8]);
-        // Out-of-range values are dropped; duplicates collapse.
-        assert_eq!(parse_selection("2 2 9-99", 5), [2]);
-        assert!(parse_selection("", 5).is_empty());
-        assert!(parse_selection("abc", 5).is_empty());
-    }
-}
-
 /// Print the pending changes of a transaction as aligned, color-coded sections.
 /// `manual` names the packages apt considers manually installed, so removals of
 /// packages the user chose can be flagged.
 pub fn print_transaction(tx: &Transaction, manual: &std::collections::HashSet<String>) {
-    let (upgrades, installs): (Vec<_>, Vec<_>) =
-        tx.install.iter().partition(|c| c.old.is_some());
+    let (upgrades, installs): (Vec<_>, Vec<_>) = tx.install.iter().partition(|c| c.old.is_some());
 
     let name_width = tx
         .install
@@ -175,5 +165,19 @@ pub fn print_transaction(tx: &Transaction, manual: &std::collections::HashSet<St
                 c.old.as_deref().unwrap_or("?").dimmed()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_selection;
+
+    #[test]
+    fn parses_ranges_and_singles() {
+        assert_eq!(parse_selection("1 3-5 8", 10), [1, 3, 4, 5, 8]);
+        // Out-of-range values are dropped; duplicates collapse.
+        assert_eq!(parse_selection("2 2 9-99", 5), [2]);
+        assert!(parse_selection("", 5).is_empty());
+        assert!(parse_selection("abc", 5).is_empty());
     }
 }

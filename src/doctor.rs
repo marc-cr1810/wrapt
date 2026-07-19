@@ -58,7 +58,10 @@ pub fn run(json: bool) -> Result<()> {
             Status::Ok => ("✓".green().bold().to_string(), c.title.clone()),
             Status::Warn => {
                 warnings += 1;
-                ("!".yellow().bold().to_string(), c.title.yellow().to_string())
+                (
+                    "!".yellow().bold().to_string(),
+                    c.title.yellow().to_string(),
+                )
             }
             Status::Problem => {
                 problems += 1;
@@ -112,7 +115,10 @@ fn broken_packages() -> Check {
 
 /// `apt-get check` verifies the dependency tree is satisfiable.
 fn unmet_dependencies() -> Check {
-    let out = Command::new("apt-get").arg("check").env("LC_ALL", "C").output();
+    let out = Command::new("apt-get")
+        .arg("check")
+        .env("LC_ALL", "C")
+        .output();
     match out {
         Ok(o) if o.status.success() => ok("All dependencies are satisfied"),
         Ok(o) => {
@@ -192,7 +198,10 @@ fn boot_space() -> Check {
 
     match free_bytes("/boot") {
         Some(free) if free < 200 * 1024 * 1024 => Check {
-            title: format!("/boot is low on space ({} free)", crate::ui::format_size(free)),
+            title: format!(
+                "/boot is low on space ({} free)",
+                crate::ui::format_size(free)
+            ),
             status: Status::Warn,
             detail: vec![format!("{kernels} kernel(s) installed")],
             fix: Some("wrapt autoremove".into()),
@@ -207,9 +216,12 @@ fn duplicate_sources() -> Check {
     let mut dupes: BTreeSet<String> = BTreeSet::new();
     let mut files = vec![std::path::PathBuf::from("/etc/apt/sources.list")];
     if let Ok(entries) = std::fs::read_dir("/etc/apt/sources.list.d") {
-        files.extend(entries.flatten().map(|e| e.path()).filter(|p| {
-            p.extension().is_some_and(|e| e == "list")
-        }));
+        files.extend(
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "list")),
+        );
     }
     for file in files {
         let Ok(content) = std::fs::read_to_string(&file) else {
@@ -238,12 +250,22 @@ fn duplicate_sources() -> Check {
 }
 
 fn ok(title: &str) -> Check {
-    Check { title: title.to_string(), status: Status::Ok, detail: Vec::new(), fix: None }
+    Check {
+        title: title.to_string(),
+        status: Status::Ok,
+        detail: Vec::new(),
+        fix: None,
+    }
 }
 
 fn run_lines(cmd: &mut Command) -> Vec<String> {
     cmd.output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default()
 }
 

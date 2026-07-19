@@ -26,10 +26,10 @@ impl Report {
 
 /// Prefer `needrestart` if installed; otherwise scan /proc ourselves.
 pub fn check() -> Report {
-    if which("needrestart") {
-        if let Some(report) = via_needrestart() {
-            return report;
-        }
+    if which("needrestart")
+        && let Some(report) = via_needrestart()
+    {
+        return report;
     }
     Report {
         services: scan_proc(),
@@ -62,7 +62,14 @@ pub fn offer(report: &Report, yes: bool) -> Result<()> {
                     .status()
                     .map(|s| s.success())
                     .unwrap_or(false);
-                println!("{}", if ok { "ok".green().to_string() } else { "failed".red().to_string() });
+                println!(
+                    "{}",
+                    if ok {
+                        "ok".green().to_string()
+                    } else {
+                        "failed".red().to_string()
+                    }
+                );
             }
         } else {
             println!(
@@ -127,7 +134,10 @@ fn scan_proc() -> Vec<String> {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(pid) = name.to_str().filter(|s| s.bytes().all(|b| b.is_ascii_digit())) else {
+        let Some(pid) = name
+            .to_str()
+            .filter(|s| s.bytes().all(|b| b.is_ascii_digit()))
+        else {
             continue;
         };
         if !maps_deleted_lib(pid) {

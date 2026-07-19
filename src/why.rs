@@ -88,14 +88,21 @@ impl Graph {
                 if let Some(providers) = provided_by.get(dep) {
                     for provider in providers {
                         if provider != pkg {
-                            rdeps.entry(provider.clone()).or_default().insert(pkg.clone());
+                            rdeps
+                                .entry(provider.clone())
+                                .or_default()
+                                .insert(pkg.clone());
                         }
                     }
                 }
             }
         }
 
-        Ok(Graph { installed, auto: auto_set(), rdeps })
+        Ok(Graph {
+            installed,
+            auto: auto_set(),
+            rdeps,
+        })
     }
 
     pub fn explain(&self, package: &str, all: bool) -> Explanation {
@@ -122,7 +129,14 @@ impl Graph {
             (false, true) => (Vec::new(), self.manual_roots(&package)),
         };
 
-        Explanation { package, installed: true, manual, required_by, chain, roots }
+        Explanation {
+            package,
+            installed: true,
+            manual,
+            required_by,
+            chain,
+            roots,
+        }
     }
 
     /// Breadth-first walk up the reverse-dependency edges to the nearest
@@ -243,11 +257,24 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let auto = ["libvlc5", "libvlccore9"].iter().map(|s| s.to_string()).collect();
+        let auto = ["libvlc5", "libvlccore9"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut rdeps: HashMap<String, BTreeSet<String>> = HashMap::new();
-        rdeps.entry("libvlccore9".into()).or_default().insert("libvlc5".into());
-        rdeps.entry("libvlc5".into()).or_default().insert("vlc".into());
-        let g = Graph { installed, auto, rdeps };
+        rdeps
+            .entry("libvlccore9".into())
+            .or_default()
+            .insert("libvlc5".into());
+        rdeps
+            .entry("libvlc5".into())
+            .or_default()
+            .insert("vlc".into());
+        let g = Graph {
+            installed,
+            auto,
+            rdeps,
+        };
 
         let e = g.explain("libvlccore9", false);
         assert!(e.installed && !e.manual);
@@ -266,11 +293,24 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let auto = ["ffmpeg-lib", "libavcodec60"].iter().map(|s| s.to_string()).collect();
+        let auto = ["ffmpeg-lib", "libavcodec60"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut rdeps: HashMap<String, BTreeSet<String>> = HashMap::new();
-        rdeps.entry("libavcodec60".into()).or_default().insert("ffmpeg-lib".into());
-        rdeps.entry("ffmpeg-lib".into()).or_default().extend(["vlc".to_string(), "mpv".to_string()]);
-        let g = Graph { installed, auto, rdeps };
+        rdeps
+            .entry("libavcodec60".into())
+            .or_default()
+            .insert("ffmpeg-lib".into());
+        rdeps
+            .entry("ffmpeg-lib".into())
+            .or_default()
+            .extend(["vlc".to_string(), "mpv".to_string()]);
+        let g = Graph {
+            installed,
+            auto,
+            rdeps,
+        };
 
         let e = g.explain("libavcodec60", true);
         assert_eq!(e.roots, ["mpv", "vlc"]);

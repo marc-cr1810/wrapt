@@ -140,8 +140,7 @@ pub fn find(id: Option<u64>) -> Result<Entry> {
 pub fn record(command: &[String], tx: &Transaction) -> Result<()> {
     let path = history_path();
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("cannot create {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
     let entry = Entry {
         id: load().last().map_or(1, |e| e.id + 1),

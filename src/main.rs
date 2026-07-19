@@ -1,7 +1,8 @@
 mod apt;
 mod cli;
-mod download;
+mod config;
 mod doctor;
+mod download;
 mod exec;
 mod history;
 mod lists;
@@ -13,7 +14,7 @@ mod why;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use owo_colors::OwoColorize;
 
@@ -32,6 +33,10 @@ fn archives_dir() -> (PathBuf, bool) {
 
 #[tokio::main]
 async fn main() {
+    // Rust ignores SIGPIPE by default, which makes `wrapt search … | head`
+    // panic on the closed pipe. Restore the default so we exit quietly instead.
+    restore_sigpipe();
+
     let cli = cli::Cli::parse();
     if let Err(e) = run(cli).await {
         ui::error(&format!("{e:#}"));
@@ -39,39 +44,120 @@ async fn main() {
     }
 }
 
+fn restore_sigpipe() {
+    // SAFETY: setting a signal disposition to the default handler is sound and
+    // is the standard fix for CLI tools that write to pipes.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 async fn run(cli: cli::Cli) -> Result<()> {
-    let jobs = cli.parallel.max(1);
-    let verbose = cli.verbose;
-    let opts = TxOpts { yes: false, jobs, verbose };
+    let cfg = config::Config::load()?;
+    cfg.apply_color();
+
+    // CLI flags win; otherwise fall back to config, then built-in defaults.
+    let jobs = cli.parallel.or(cfg.parallel).unwrap_or(5).max(1);
+    let verbose = cli.verbose || cfg.verbose.unwrap_or(false);
+    let assume_yes = cfg.assume_yes.unwrap_or(false);
+    let opts = TxOpts {
+        yes: assume_yes,
+        jobs,
+        verbose,
+    };
     match cli.command {
         Command::Update => cmd_update(),
-        Command::Upgrade { yes, full, security_only } => {
-            cmd_upgrade(full, security_only, TxOpts { yes, ..opts }).await
+        Command::Upgrade {
+            yes,
+            full,
+            security_only,
+        } => {
+            cmd_upgrade(
+                full,
+                security_only,
+                TxOpts {
+                    yes: yes || assume_yes,
+                    ..opts
+                },
+            )
+            .await
         }
         Command::Install { packages, yes } => {
             let mut args = vec!["install".to_string()];
             args.extend(packages.clone());
-            transaction(args, &packages, TxOpts { yes, ..opts }, "Installing packages...").await
+            transaction(
+                args,
+                &packages,
+                TxOpts {
+                    yes: yes || assume_yes,
+                    ..opts
+                },
+                "Installing packages...",
+            )
+            .await
         }
-        Command::Remove { packages, yes, purge } => {
+        Command::Remove {
+            packages,
+            yes,
+            purge,
+        } => {
             let op = if purge { "purge" } else { "remove" };
             let mut args = vec![op.to_string()];
             args.extend(packages.clone());
-            transaction(args, &packages, TxOpts { yes, ..opts }, "Removing packages...").await
+            transaction(
+                args,
+                &packages,
+                TxOpts {
+                    yes: yes || assume_yes,
+                    ..opts
+                },
+                "Removing packages...",
+            )
+            .await
         }
         Command::Autoremove { yes } => {
             transaction(
                 vec!["autoremove".to_string()],
                 &[],
-                TxOpts { yes, ..opts },
+                TxOpts {
+                    yes: yes || assume_yes,
+                    ..opts
+                },
                 "Removing unused packages...",
             )
             .await
         }
         Command::History { id } => cmd_history(id, cli.json),
-        Command::Undo { id, yes } => cmd_undo(id, TxOpts { yes, ..opts }).await,
-        Command::Redo { id, yes } => cmd_redo(id, TxOpts { yes, ..opts }).await,
-        Command::Rollback { id, yes } => cmd_rollback(id, TxOpts { yes, ..opts }).await,
+        Command::Undo { id, yes } => {
+            cmd_undo(
+                id,
+                TxOpts {
+                    yes: yes || assume_yes,
+                    ..opts
+                },
+            )
+            .await
+        }
+        Command::Redo { id, yes } => {
+            cmd_redo(
+                id,
+                TxOpts {
+                    yes: yes || assume_yes,
+                    ..opts
+                },
+            )
+            .await
+        }
+        Command::Rollback { id, yes } => {
+            cmd_rollback(
+                id,
+                TxOpts {
+                    yes: yes || assume_yes,
+                    ..opts
+                },
+            )
+            .await
+        }
         Command::Search { query } => cmd_search(&query, opts, cli.json).await,
         Command::Show { package } => cmd_show(&package),
         Command::Why { package, all } => cmd_why(&package, all, cli.json),
@@ -91,6 +177,13 @@ async fn run(cli: cli::Cli) -> Result<()> {
             );
             Ok(())
         }
+        Command::Man => {
+            use clap::CommandFactory;
+            clap_mangen::Man::new(cli::Cli::command())
+                .render(&mut std::io::stdout())
+                .context("failed to render man page")?;
+            Ok(())
+        }
     }
 }
 
@@ -103,7 +196,10 @@ fn cmd_hold(hold: bool, packages: &[String]) -> Result<()> {
     let changed = apt::set_hold(hold, packages)?;
     let verb = if hold { "Held" } else { "Unheld" };
     if changed.is_empty() {
-        ui::success(&format!("Nothing changed ({} already in that state).", packages.join(", ")));
+        ui::success(&format!(
+            "Nothing changed ({} already in that state).",
+            packages.join(", ")
+        ));
     } else {
         ui::success(&format!("{verb} {} package(s).", packages.len()));
     }
@@ -140,14 +236,22 @@ async fn cmd_rollback(id: u64, opts: TxOpts) -> Result<()> {
     }
     let entries = history::after(id);
     if entries.is_empty() {
-        ui::success(&format!("Already at transaction {id} — nothing to roll back."));
+        ui::success(&format!(
+            "Already at transaction {id} — nothing to roll back."
+        ));
         return Ok(());
     }
     ui::header(&format!(
         "Rolling back {} transaction(s) to the state after #{id}",
         entries.len()
     ));
-    transaction(history::rollback_args(&entries), &[], opts, "Rolling back...").await
+    transaction(
+        history::rollback_args(&entries),
+        &[],
+        opts,
+        "Rolling back...",
+    )
+    .await
 }
 
 /// Options shared by every state-changing command.
@@ -336,9 +440,19 @@ fn cmd_history(id: Option<u64>, json: bool) -> Result<()> {
                 ui::warn("No transactions recorded yet.");
                 return Ok(());
             }
-            println!("  {:>4}  {:16}  {}", "ID".bold(), "Date".bold(), "Action".bold());
+            println!(
+                "  {:>4}  {:16}  {}",
+                "ID".bold(),
+                "Date".bold(),
+                "Action".bold()
+            );
             for e in &entries {
-                println!("  {:>4}  {:16}  {}", e.id.to_string().cyan(), e.date().dimmed(), e.summary());
+                println!(
+                    "  {:>4}  {:16}  {}",
+                    e.id.to_string().cyan(),
+                    e.date().dimmed(),
+                    e.summary()
+                );
             }
         }
     }
@@ -423,7 +537,12 @@ async fn cmd_search(query: &str, opts: TxOpts, json: bool) -> Result<()> {
             String::new()
         };
         println!("{index}{}{version}{installed}", r.name.bold());
-        println!("{:indent$}{}", "", r.description.dimmed(), indent = if interactive { width + 2 } else { 4 });
+        println!(
+            "{:indent$}{}",
+            "",
+            r.description.dimmed(),
+            indent = if interactive { width + 2 } else { 4 }
+        );
     }
 
     if !interactive {
@@ -471,7 +590,11 @@ fn cmd_show(package: &str) -> Result<()> {
         let e = graph.explain(package, false);
         if e.installed {
             println!();
-            let state = if e.manual { "installed (manual)" } else { "installed (automatic)" };
+            let state = if e.manual {
+                "installed (manual)"
+            } else {
+                "installed (automatic)"
+            };
             println!("{} {}", "Status:".cyan().bold(), state.green());
             if !e.manual && e.chain.len() >= 2 {
                 println!(
@@ -518,7 +641,10 @@ fn cmd_why(package: &str, all: bool, json: bool) -> Result<()> {
 
     ui::header(&e.package);
     if e.manual {
-        println!("   {}", "Installed manually — you asked for this package directly.".green());
+        println!(
+            "   {}",
+            "Installed manually — you asked for this package directly.".green()
+        );
         if !e.required_by.is_empty() {
             println!(
                 "   {} {}",
@@ -529,7 +655,10 @@ fn cmd_why(package: &str, all: bool, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("   {}", "Installed automatically, as a dependency.".yellow());
+    println!(
+        "   {}",
+        "Installed automatically, as a dependency.".yellow()
+    );
 
     if all {
         println!();
@@ -565,7 +694,10 @@ fn cmd_why(package: &str, all: bool, json: bool) -> Result<()> {
             })
             .collect();
         println!();
-        println!("   {} installed it manually, which pulls in:", e.chain[0].green().bold());
+        println!(
+            "   {} installed it manually, which pulls in:",
+            e.chain[0].green().bold()
+        );
         println!("     {}", rendered.join(&format!(" {} ", "→".cyan())));
     } else if e.required_by.is_empty() {
         println!();
@@ -573,7 +705,11 @@ fn cmd_why(package: &str, all: bool, json: bool) -> Result<()> {
             "   {}",
             "Nothing installed depends on it — it looks orphaned.".yellow()
         );
-        println!("   {} {}", "Remove unused packages with:".dimmed(), "wrapt autoremove".cyan());
+        println!(
+            "   {} {}",
+            "Remove unused packages with:".dimmed(),
+            "wrapt autoremove".cyan()
+        );
     }
 
     if !e.required_by.is_empty() {
@@ -588,7 +724,10 @@ fn cmd_why(package: &str, all: bool, json: bool) -> Result<()> {
             println!("     {pkg}");
         }
         if e.required_by.len() > MAX {
-            println!("     {}", format!("… and {} more", e.required_by.len() - MAX).dimmed());
+            println!(
+                "     {}",
+                format!("… and {} more", e.required_by.len() - MAX).dimmed()
+            );
         }
     }
     Ok(())
@@ -600,6 +739,10 @@ fn summarize(items: &[String]) -> String {
     if items.len() <= MAX {
         items.join(", ")
     } else {
-        format!("{}, … (+{} more)", items[..MAX].join(", "), items.len() - MAX)
+        format!(
+            "{}, … (+{} more)",
+            items[..MAX].join(", "),
+            items.len() - MAX
+        )
     }
 }

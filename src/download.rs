@@ -92,22 +92,18 @@ async fn download_one(
     let final_path = dest.join(&item.filename);
 
     // Already in the cache with the right size — apt will hash-verify it anyway.
-    if let Ok(meta) = std::fs::metadata(&final_path) {
-        if meta.len() == item.size {
-            total.inc(item.size);
-            return Ok(());
-        }
+    if let Ok(meta) = std::fs::metadata(&final_path)
+        && meta.len() == item.size
+    {
+        total.inc(item.size);
+        return Ok(());
     }
 
     let bar = multi.insert_before(total, ProgressBar::new(item.size));
     bar.set_style(bar_style());
     bar.set_message(item.display_name().to_string());
 
-    let mut response = client
-        .get(&item.url)
-        .send()
-        .await?
-        .error_for_status()?;
+    let mut response = client.get(&item.url).send().await?.error_for_status()?;
 
     let partial_path = dest.join("partial").join(&item.filename);
     let mut file = tokio::fs::File::create(&partial_path)
