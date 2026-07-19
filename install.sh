@@ -22,11 +22,13 @@ BIN_DIR="$PREFIX/bin"
 BASH_COMPLETION_DIR="${BASH_COMPLETION_DIR:-/usr/share/bash-completion/completions}"
 ZSH_COMPLETION_DIR="${ZSH_COMPLETION_DIR:-/usr/local/share/zsh/site-functions}"
 FISH_COMPLETION_DIR="${FISH_COMPLETION_DIR:-/usr/share/fish/vendor_completions.d}"
+MAN_DIR="${MAN_DIR:-$PREFIX/share/man/man1}"
 
 BIN_PATH="$BIN_DIR/wrapt"
 BASH_COMP="$BASH_COMPLETION_DIR/wrapt"
 ZSH_COMP="$ZSH_COMPLETION_DIR/_wrapt"
 FISH_COMP="$FISH_COMPLETION_DIR/wrapt.fish"
+MAN_PATH="$MAN_DIR/wrapt.1.gz"
 
 # --- pretty output -----------------------------------------------------------
 if [ -t 1 ]; then
@@ -79,6 +81,7 @@ if [ "${1:-}" = "--uninstall" ]; then
     remove_file "$BASH_COMP"
     remove_file "$ZSH_COMP"
     remove_file "$FISH_COMP"
+    remove_file "$MAN_PATH"
     printf '\n%s✓ wrapt removed.%s\n' "$GREEN$BOLD" "$RESET"
     exit 0
 fi
@@ -120,6 +123,11 @@ ok "zsh   → $ZSH_COMP ${DIM}(on the default fpath — no .zshrc edit needed)${
 "$BUILT" completions fish > "$TMP/wrapt.fish"
 install_file "$TMP/wrapt.fish" "$FISH_COMP" 0644
 ok "fish  → $FISH_COMP"
+
+step "Installing man page"
+"$BUILT" man | gzip -9n > "$TMP/wrapt.1.gz"
+install_file "$TMP/wrapt.1.gz" "$MAN_PATH" 0644
+ok "man   → $MAN_PATH"
 
 # --- done --------------------------------------------------------------------
 printf '\n%s✓ wrapt installed.%s\n' "$GREEN$BOLD" "$RESET"

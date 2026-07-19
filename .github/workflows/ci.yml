@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install components
+        run: rustup component add rustfmt clippy
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: cargo test --all
+
+  integration:
+    name: integration (real apt, as root)
+    runs-on: ubuntu-latest
+    # Run inside a root container so wrapt executes with real privileges
+    # against a real, disposable apt — the closest thing to production.
+    container: rust:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test prerequisites
+        run: apt-get update && apt-get install -y --no-install-recommends util-linux python3
+      - name: Build
+        run: cargo build --release
+      - name: Integration tests
+        run: bash tests/integration.sh
