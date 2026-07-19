@@ -31,8 +31,14 @@ pacman's speed and a friendlier face.
   `rollback` to any past point.
 - **Fast search** — parses apt's package indexes directly (~2× faster than
   `apt-cache search`), with an interactive pick-to-install prompt.
-- **`why`** — explains *why* a package is on your system, tracing the dependency
-  chain back to something you installed on purpose.
+- **`why` / `why-not`** — explains *why* a package is on your system (tracing the
+  dependency chain back to something you installed on purpose), or *why not* — the
+  plain-English reason a package can't be installed.
+- **Preview anything** — `--dry-run` on any command, or `wrapt plan <pkgs>`, shows
+  the full transaction (sizes and all) without touching the system.
+- **Local & remote `.debs`** — `wrapt install ./foo.deb` or an `https://…deb` URL,
+  with dependencies resolved by apt as usual.
+- **Source management** — `wrapt repo` lists, adds, and removes apt sources / PPAs.
 - **Safe removal** — warns (and defaults to "no") when a removal would take
   manually-installed packages with it.
 - **Security-aware** — highlights which upgrades are security fixes;
@@ -108,9 +114,12 @@ sudo wrapt upgrade --security-only
 | --- | --- |
 | `wrapt update` | Refresh package lists |
 | `wrapt upgrade [--full] [--security-only]` | Upgrade installed packages |
-| `wrapt install <pkgs…>` | Install packages |
+| `wrapt install <pkgs\|./file.deb\|url…>` | Install packages, local `.deb`s, or remote `.deb` URLs |
+| `wrapt reinstall <pkgs…>` | Reinstall packages, fetching them again |
 | `wrapt remove <pkgs…> [--purge]` | Remove packages |
 | `wrapt autoremove` | Remove packages that are no longer needed |
+| `wrapt download <pkgs…>` | Download `.deb`s to the current directory (no install) |
+| `wrapt clean [--all]` | Free disk space by clearing the download cache |
 | `wrapt hold <pkgs…>` / `unhold` / `held` | Pin packages at their current version |
 
 ### History
@@ -127,8 +136,12 @@ sudo wrapt upgrade --security-only
 | Command | Description |
 | --- | --- |
 | `wrapt search <query>` | Search for packages (interactive install) |
+| `wrapt list [--upgradable\|--manual] [pattern]` | List installed / upgradable / manual packages |
 | `wrapt show <pkg>` | Detailed info, including why it's installed |
 | `wrapt why <pkg> [--all]` | Explain why a package is installed |
+| `wrapt why-not <pkg>` | Explain why a package can't be installed |
+| `wrapt plan <pkgs…>` | Preview what installing packages would do |
+| `wrapt changelog <pkg>` | Show a changelog, highlighting security fixes |
 | `wrapt provides <file>` | Find which package provides a file/command |
 
 ### Maintenance
@@ -136,6 +149,7 @@ sudo wrapt upgrade --security-only
 | Command | Description |
 | --- | --- |
 | `wrapt doctor` | Check the system for common package problems |
+| `wrapt repo list` / `add <repo>` / `remove <repo>` | Manage apt sources and PPAs |
 | `wrapt config-diff` | Review config files left by upgrades (`*.dpkg-dist`) |
 | `wrapt completions <shell>` | Print a shell completion script |
 | `wrapt self-update` | Update wrapt itself to the latest release (`--check` to only look) |
@@ -159,7 +173,8 @@ variable or a `repo = "owner/name"` line in the config file.
 
 - `-j, --parallel <N>` — number of parallel downloads (default 5)
 - `-v, --verbose` — show apt's raw output instead of the clean display
-- `--json` — machine-readable output (`search`, `why`, `history`, `doctor`)
+- `-n, --dry-run` — show what a command would do, then stop without changing anything
+- `--json` — machine-readable output (`search`, `list`, `why`, `history`, `doctor`)
 
 ## How it works
 

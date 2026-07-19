@@ -196,9 +196,34 @@ pub fn print_uris(args: &[String]) -> Result<Vec<DownloadItem>> {
     if !out.status.success() {
         bail!("{}", apt_error(&out.stderr));
     }
+    Ok(parse_uri_lines(&String::from_utf8_lossy(&out.stdout)))
+}
 
+/// URIs of just the named packages (no dependency resolution), for `download`.
+/// `apt-get download --print-uris` lists one line per requested package.
+pub fn download_uris(packages: &[String]) -> Result<Vec<DownloadItem>> {
+    let out = apt_get()
+        .args(["download", "--print-uris"])
+        .args(packages)
+        .output()
+        .context("failed to run apt-get")?;
+    if !out.status.success() {
+        bail!("{}", apt_error(&out.stderr));
+    }
+    let items = parse_uri_lines(&String::from_utf8_lossy(&out.stdout));
+    if items.is_empty() {
+        bail!(
+            "nothing to download — check the package name(s), or run `wrapt update` \
+             if your package lists are stale"
+        );
+    }
+    Ok(items)
+}
+
+/// Parse apt's `--print-uris` output: `'url' filename size [HASH:hex]` per line.
+fn parse_uri_lines(stdout: &str) -> Vec<DownloadItem> {
     let mut items = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    for line in stdout.lines() {
         let mut tokens = line.split_whitespace();
         let (Some(url), Some(filename), Some(size)) = (tokens.next(), tokens.next(), tokens.next())
         else {
@@ -222,7 +247,57 @@ pub fn print_uris(args: &[String]) -> Result<Vec<DownloadItem>> {
             hash,
         });
     }
-    Ok(items)
+    items
+}
+
+/// Clear apt's downloaded-package cache. `all` removes every archived .deb
+/// (`clean`); otherwise only ones that can no longer be downloaded (`autoclean`).
+pub fn clean(all: bool) -> Result<()> {
+    let op = if all { "clean" } else { "autoclean" };
+    let out = apt_get()
+        .arg(op)
+        .output()
+        .context("failed to run apt-get")?;
+    if !out.status.success() {
+        bail!("{}", apt_error(&out.stderr));
+    }
+    Ok(())
+}
+
+/// A package's changelog text (`apt-get changelog`), fetched from the archive.
+pub fn changelog(package: &str) -> Result<String> {
+    let out = apt_get()
+        .args(["changelog", "--", package])
+        .output()
+        .with_context(|| format!("failed to fetch changelog for {package}"))?;
+    if !out.status.success() {
+        bail!("{}", apt_error(&out.stderr));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `(name, version)` for every currently-installed package.
+pub fn installed_versions() -> Vec<(String, String)> {
+    let Ok(out) = Command::new("dpkg-query")
+        .args([
+            "-W",
+            "-f",
+            "${db:Status-Status} ${binary:Package} ${Version}\n",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("installed ")?;
+            let (name, version) = rest.split_once(' ')?;
+            // Normalise name:arch to name so it matches the manual/held sets.
+            let name = name.split(':').next().unwrap_or(name);
+            Some((name.to_string(), version.to_string()))
+        })
+        .collect()
 }
 
 /// Run `apt-get update`, restyling its progress lines as they stream in.

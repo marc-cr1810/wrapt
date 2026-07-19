@@ -22,6 +22,10 @@ pub struct Cli {
     /// Emit machine-readable JSON (supported by search, why, history, doctor)
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Show what a command would do, then stop without changing anything
+    #[arg(short = 'n', long, global = true)]
+    pub dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -59,11 +63,55 @@ pub enum Command {
         #[arg(long)]
         purge: bool,
     },
+    /// Reinstall packages, fetching their current version again
+    Reinstall {
+        #[arg(required = true)]
+        packages: Vec<String>,
+        /// Assume yes to all prompts
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Remove packages that are no longer needed
     Autoremove {
         /// Assume yes to all prompts
         #[arg(short, long)]
         yes: bool,
+    },
+    /// Download package .debs into the current directory without installing
+    Download {
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
+    /// List installed, upgradable, or manually-installed packages
+    List {
+        /// Only packages with a newer version available
+        #[arg(long)]
+        upgradable: bool,
+        /// Only packages you installed on purpose (not pulled in as deps)
+        #[arg(long)]
+        manual: bool,
+        /// Filter to packages whose name contains this text
+        pattern: Option<String>,
+    },
+    /// Preview what installing packages would do, without installing
+    Plan {
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
+    /// Free disk space by clearing the downloaded-package cache
+    Clean {
+        /// Remove every cached .deb, not just ones that can't be re-downloaded
+        #[arg(long)]
+        all: bool,
+    },
+    /// Explain why a package can't be installed
+    WhyNot { package: String },
+    /// Show a package's changelog, highlighting security fixes
+    Changelog { package: String },
+    /// Manage apt software sources and PPAs
+    Repo {
+        #[command(subcommand)]
+        action: RepoCmd,
     },
     /// Show the transaction history
     History {
@@ -129,5 +177,27 @@ pub enum Command {
         /// Only report whether an update is available; don't install it
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RepoCmd {
+    /// List the configured software sources
+    List,
+    /// Add a repository (e.g. `ppa:user/ppa` or a full `deb` line)
+    Add {
+        /// The repository spec, as understood by add-apt-repository
+        repo: String,
+        /// Assume yes to all prompts
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Remove a previously-added repository
+    Remove {
+        /// The repository spec to remove
+        repo: String,
+        /// Assume yes to all prompts
+        #[arg(short, long)]
+        yes: bool,
     },
 }

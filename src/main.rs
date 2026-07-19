@@ -1,17 +1,21 @@
 mod apt;
+mod changelog;
 mod cli;
 mod config;
 mod doctor;
 mod download;
 mod exec;
 mod history;
+mod listpkgs;
 mod lists;
 mod provides;
+mod repo;
 mod resolve;
 mod restart;
 mod selfupdate;
 mod ui;
 mod why;
+mod whynot;
 
 use std::path::PathBuf;
 
@@ -67,6 +71,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
         yes: assume_yes,
         jobs,
         verbose,
+        dry_run: cli.dry_run,
     };
     match cli.command {
         Command::Update => cmd_update(),
@@ -91,7 +96,17 @@ async fn run(cli: cli::Cli) -> Result<()> {
             res
         }
         Command::Install { packages, yes } => {
-            let mut args = vec!["install".to_string()];
+            cmd_install(
+                packages,
+                TxOpts {
+                    yes: yes || assume_yes,
+                    ..opts
+                },
+            )
+            .await
+        }
+        Command::Reinstall { packages, yes } => {
+            let mut args = vec!["install".to_string(), "--reinstall".to_string()];
             args.extend(packages.clone());
             transaction(
                 args,
@@ -100,10 +115,21 @@ async fn run(cli: cli::Cli) -> Result<()> {
                     yes: yes || assume_yes,
                     ..opts
                 },
-                "Installing packages...",
+                "Reinstalling packages...",
             )
             .await
         }
+        Command::Download { packages } => cmd_download(&packages, opts.jobs).await,
+        Command::List {
+            upgradable,
+            manual,
+            pattern,
+        } => listpkgs::run(upgradable, manual, pattern.as_deref(), cli.json),
+        Command::Plan { packages } => cmd_plan(&packages),
+        Command::Clean { all } => cmd_clean(all),
+        Command::WhyNot { package } => whynot::run(&package),
+        Command::Changelog { package } => changelog::run(&package),
+        Command::Repo { action } => repo::run(action),
         Command::Remove {
             packages,
             yes,
@@ -269,6 +295,8 @@ struct TxOpts {
     yes: bool,
     jobs: usize,
     verbose: bool,
+    /// Show the plan and stop, without downloading or changing anything.
+    dry_run: bool,
 }
 
 async fn cmd_upgrade(full: bool, security_only: bool, opts: TxOpts) -> Result<()> {
@@ -305,7 +333,10 @@ async fn transaction(
     opts: TxOpts,
     action: &str,
 ) -> Result<()> {
-    apt::ensure_root()?;
+    // A dry run only previews; it needs no root and touches nothing.
+    if !opts.dry_run {
+        apt::ensure_root()?;
+    }
 
     let command = args.clone();
     let tx = apt::simulate(&args).map_err(|e| resolve::explain(e, named))?;
@@ -314,64 +345,15 @@ async fn transaction(
         return Ok(());
     }
 
-    let manual = apt::manual_set();
-    ui::print_transaction(&tx, &manual);
-    println!();
+    let (default_yes, items) = print_plan(&tx, &args, named)?;
 
-    // Safe removal: warn when packages the user installed on purpose would be
-    // removed as collateral (i.e. not ones they named on this command line).
-    let named_set: std::collections::HashSet<&str> = named.iter().map(String::as_str).collect();
-    let collateral: Vec<&str> = tx
-        .remove
-        .iter()
-        .filter(|c| manual.contains(&c.name) && !named_set.contains(c.name.as_str()))
-        .map(|c| c.name.as_str())
-        .collect();
-    if !collateral.is_empty() {
-        ui::warn(&format!(
-            "This will also remove {} package{} you installed manually:",
-            collateral.len(),
-            if collateral.len() == 1 { "" } else { "s" }
-        ));
-        eprintln!("    {}", collateral.join(", ").yellow());
-        println!();
+    if opts.dry_run {
+        ui::success("Dry run — nothing was changed.");
+        return Ok(());
     }
-
-    let items = apt::print_uris(&args)?;
-    let download_size: u64 = items.iter().map(|i| i.size).sum();
-    if !items.is_empty() {
-        println!(
-            "   {} {}",
-            "Total download size:".bold(),
-            ui::format_size(download_size).cyan()
-        );
-    }
-    if let Some(disk) = apt::disk_usage(&tx) {
-        if disk.installed > 0 {
-            println!(
-                "   {} {}",
-                "Total installed size:".bold(),
-                ui::format_size(disk.installed).cyan()
-            );
-        }
-        if disk.net_change != disk.installed as i64 {
-            let (sign, magnitude) = if disk.net_change >= 0 {
-                ("+", disk.net_change as u64)
-            } else {
-                ("-", disk.net_change.unsigned_abs())
-            };
-            println!(
-                "   {} {sign}{}",
-                "Net disk change:".bold(),
-                ui::format_size(magnitude).cyan()
-            );
-        }
-    }
-    println!();
 
     // Default the prompt to "no" when manually-installed packages would be
     // removed as collateral — safer for a destructive surprise.
-    let default_yes = collateral.is_empty();
     if !opts.yes && !ui::confirm("Proceed?", default_yes) {
         ui::warn("Aborted.");
         return Ok(());
@@ -411,6 +393,212 @@ async fn transaction(
         restart::offer(&report, opts.yes)?;
     }
     Ok(())
+}
+
+/// Print a transaction's plan: the package changes, any collateral-removal
+/// warning, and the download/disk sizes. Returns `(safe_default_yes, items)`
+/// where `safe_default_yes` is false when manually-installed packages would be
+/// removed as collateral, and `items` is what apt would download.
+fn print_plan(
+    tx: &apt::Transaction,
+    args: &[String],
+    named: &[String],
+) -> Result<(bool, Vec<download::DownloadItem>)> {
+    let manual = apt::manual_set();
+    ui::print_transaction(tx, &manual);
+    println!();
+
+    // Safe removal: warn when packages the user installed on purpose would be
+    // removed as collateral (i.e. not ones they named on this command line).
+    let named_set: std::collections::HashSet<&str> = named.iter().map(String::as_str).collect();
+    let collateral: Vec<&str> = tx
+        .remove
+        .iter()
+        .filter(|c| manual.contains(&c.name) && !named_set.contains(c.name.as_str()))
+        .map(|c| c.name.as_str())
+        .collect();
+    if !collateral.is_empty() {
+        ui::warn(&format!(
+            "This will also remove {} package{} you installed manually:",
+            collateral.len(),
+            if collateral.len() == 1 { "" } else { "s" }
+        ));
+        eprintln!("    {}", collateral.join(", ").yellow());
+        println!();
+    }
+
+    let items = apt::print_uris(args)?;
+    let download_size: u64 = items.iter().map(|i| i.size).sum();
+    if !items.is_empty() {
+        println!(
+            "   {} {}",
+            "Total download size:".bold(),
+            ui::format_size(download_size).cyan()
+        );
+    }
+    if let Some(disk) = apt::disk_usage(tx) {
+        if disk.installed > 0 {
+            println!(
+                "   {} {}",
+                "Total installed size:".bold(),
+                ui::format_size(disk.installed).cyan()
+            );
+        }
+        if disk.net_change != disk.installed as i64 {
+            let (sign, magnitude) = if disk.net_change >= 0 {
+                ("+", disk.net_change as u64)
+            } else {
+                ("-", disk.net_change.unsigned_abs())
+            };
+            println!(
+                "   {} {sign}{}",
+                "Net disk change:".bold(),
+                ui::format_size(magnitude).cyan()
+            );
+        }
+    }
+    println!();
+
+    Ok((collateral.is_empty(), items))
+}
+
+/// `wrapt install`, extended so a spec may be a plain package name, a path to a
+/// local `.deb`, or an `http(s)://…deb` URL (fetched first, then installed).
+async fn cmd_install(packages: Vec<String>, opts: TxOpts) -> Result<()> {
+    let mut args = vec!["install".to_string()];
+    let mut named: Vec<String> = Vec::new();
+    let mut url_items: Vec<download::DownloadItem> = Vec::new();
+    let mut tmp: Option<PathBuf> = None;
+
+    for spec in &packages {
+        if spec.starts_with("http://") || spec.starts_with("https://") {
+            let dir = tmp.get_or_insert_with(|| {
+                std::env::temp_dir().join(format!("wrapt-install-{}", std::process::id()))
+            });
+            let filename = spec
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("package.deb")
+                .to_string();
+            args.push(dir.join(&filename).to_string_lossy().into_owned());
+            url_items.push(download::DownloadItem {
+                url: spec.clone(),
+                filename,
+                size: 0,
+                hash: None,
+            });
+        } else if is_local_deb(spec) {
+            // apt needs a path it recognises as a file (absolute is unambiguous).
+            let abs = std::fs::canonicalize(spec).with_context(|| format!("cannot read {spec}"))?;
+            args.push(abs.to_string_lossy().into_owned());
+        } else {
+            args.push(spec.clone());
+            named.push(spec.clone());
+        }
+    }
+
+    // Fetch any remote .debs before handing off to apt.
+    if let Some(dir) = &tmp {
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        ui::header(&format!(
+            "Fetching {} remote package{}...",
+            url_items.len(),
+            if url_items.len() == 1 { "" } else { "s" }
+        ));
+        download::download_all(&url_items, dir, opts.jobs).await?;
+    }
+
+    let result = transaction(args, &named, opts, "Installing packages...").await;
+
+    if let Some(dir) = &tmp {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    result
+}
+
+/// True if `spec` points at an existing local `.deb` file.
+fn is_local_deb(spec: &str) -> bool {
+    spec.ends_with(".deb") && std::path::Path::new(spec).is_file()
+}
+
+/// `wrapt plan`: show what installing `packages` would do, then stop.
+fn cmd_plan(packages: &[String]) -> Result<()> {
+    let mut args = vec!["install".to_string()];
+    args.extend(packages.iter().cloned());
+    let tx = apt::simulate(&args).map_err(|e| resolve::explain(e, packages))?;
+    if tx.is_empty() {
+        ui::success("Nothing to do — those packages are already installed and up to date.");
+        return Ok(());
+    }
+    print_plan(&tx, &args, packages)?;
+    ui::success("Preview only — run `wrapt install …` to apply.");
+    Ok(())
+}
+
+/// `wrapt download`: fetch the named packages' .debs into the current directory.
+async fn cmd_download(packages: &[String], jobs: usize) -> Result<()> {
+    let items = apt::download_uris(packages)?;
+    let total: u64 = items.iter().map(|i| i.size).sum();
+    let dest = std::env::current_dir().context("cannot determine the current directory")?;
+
+    ui::header(&format!(
+        "Downloading {} package{}...",
+        items.len(),
+        if items.len() == 1 { "" } else { "s" }
+    ));
+    download::download_all(&items, &dest, jobs).await?;
+    // download_all creates a `partial/` working dir; remove it if now empty.
+    let _ = std::fs::remove_dir(dest.join("partial"));
+
+    ui::success(&format!(
+        "Downloaded {} file{} ({}) to {}.",
+        items.len(),
+        if items.len() == 1 { "" } else { "s" },
+        ui::format_size(total),
+        dest.display()
+    ));
+    Ok(())
+}
+
+/// `wrapt clean`: clear apt's package cache and report the space reclaimed.
+fn cmd_clean(all: bool) -> Result<()> {
+    apt::ensure_root()?;
+    let (dir, _custom) = archives_dir();
+    let before = dir_size(&dir);
+    apt::clean(all)?;
+    let freed = before.saturating_sub(dir_size(&dir));
+    if freed == 0 {
+        ui::success("Nothing to clean — the package cache is already empty.");
+    } else {
+        ui::success(&format!("Freed {}.", ui::format_size(freed).cyan()));
+    }
+    Ok(())
+}
+
+/// Total size in bytes of the files under `dir` (one level of subdirs deep,
+/// which covers apt's `archives/` and `archives/partial/`).
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            if let Ok(sub) = std::fs::read_dir(entry.path()) {
+                total += sub
+                    .flatten()
+                    .filter_map(|e| e.metadata().ok())
+                    .filter(|m| m.is_file())
+                    .map(|m| m.len())
+                    .sum::<u64>();
+            }
+        } else {
+            total += meta.len();
+        }
+    }
+    total
 }
 
 fn cmd_history(id: Option<u64>, json: bool) -> Result<()> {
