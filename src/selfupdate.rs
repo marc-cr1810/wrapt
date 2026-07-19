@@ -82,7 +82,8 @@ pub async fn run(check: bool, jobs: usize, repo: &str) -> Result<()> {
     apt::ensure_root()?;
 
     let arch = dpkg_arch();
-    let asset = pick_asset(&release.assets, &arch).ok_or_else(|| {
+    let host = host_os_tag();
+    let asset = pick_asset(&release.assets, &arch, host.as_deref()).ok_or_else(|| {
         anyhow!(
             "release v{latest} has no .deb for architecture '{arch}' — \
              install it manually from {}",
@@ -164,14 +165,62 @@ async fn fetch_with_timeout(repo: &str, timeout: Duration) -> Result<Release> {
     serde_json::from_str(&body).context("could not parse the GitHub releases response")
 }
 
-/// Pick the release asset for this architecture: prefer a `.deb` whose name ends
-/// `_<arch>.deb`, then fall back to any `.deb` (covers arch-independent builds).
-fn pick_asset<'a>(assets: &'a [Asset], arch: &str) -> Option<&'a Asset> {
-    let want = format!("_{arch}.deb");
-    assets
+/// Pick the release asset to install for this host. Releases ship one `.deb`
+/// per Ubuntu version (`wrapt_<ver>_ubuntu24.04_amd64.deb`, …), so among the
+/// `.deb`s for our architecture we prefer the one built for the running system.
+/// Failing an exact match we take the *safest* build — an untagged general
+/// `.deb`, else the lowest OS version, which carries the lowest ABI floor and
+/// therefore runs on the widest range of systems.
+fn pick_asset<'a>(assets: &'a [Asset], arch: &str, host_tag: Option<&str>) -> Option<&'a Asset> {
+    let suffix = format!("_{arch}.deb");
+    let debs: Vec<&Asset> = assets
         .iter()
-        .find(|a| a.name.ends_with(&want))
-        .or_else(|| assets.iter().find(|a| a.name.ends_with(".deb")))
+        .filter(|a| a.name.ends_with(&suffix))
+        .collect();
+    if debs.is_empty() {
+        // No arch-specific name; fall back to any .deb (e.g. an `_all.deb`).
+        return assets.iter().find(|a| a.name.ends_with(".deb"));
+    }
+
+    if let Some(tag) = host_tag {
+        let needle = format!("_{tag}_");
+        if let Some(a) = debs.iter().copied().find(|a| a.name.contains(&needle)) {
+            return Some(a);
+        }
+    }
+
+    debs.iter().copied().min_by(|a, b| {
+        match (asset_os_version(&a.name), asset_os_version(&b.name)) {
+            (Some(x), Some(y)) => lists::deb_version_cmp(&x, &y),
+            // An untagged general build has the widest compatibility.
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
+            (None, None) => Ordering::Equal,
+        }
+    })
+}
+
+/// Extract the OS version from an asset name like `..._ubuntu24.04_amd64.deb`.
+fn asset_os_version(name: &str) -> Option<String> {
+    let after = name.split("_ubuntu").nth(1)?;
+    let ver = after.split('_').next()?;
+    (!ver.is_empty()).then(|| ver.to_string())
+}
+
+/// The running system's OS tag (`ubuntu24.04`), matching build-deb.sh's
+/// `DEB_OS_TAG`, from `/etc/os-release`.
+fn host_os_tag() -> Option<String> {
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    let mut id = None;
+    let mut version = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("ID=") {
+            id = Some(v.trim().trim_matches('"').to_string());
+        } else if let Some(v) = line.strip_prefix("VERSION_ID=") {
+            version = Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    Some(format!("{}{}", id?, version?))
 }
 
 fn dpkg_arch() -> String {
@@ -204,7 +253,40 @@ mod tests {
             asset("wrapt_0.2.0_amd64.deb"),
             asset("wrapt-0.2.0.tar.gz"),
         ];
-        let got = pick_asset(&assets, "amd64").unwrap();
+        let got = pick_asset(&assets, "amd64", None).unwrap();
+        assert_eq!(got.name, "wrapt_0.2.0_amd64.deb");
+    }
+
+    #[test]
+    fn prefers_matching_host_os() {
+        let assets = vec![
+            asset("wrapt_0.2.0_ubuntu24.04_amd64.deb"),
+            asset("wrapt_0.2.0_ubuntu25.04_amd64.deb"),
+            asset("wrapt_0.2.0_ubuntu26.04_amd64.deb"),
+        ];
+        let got = pick_asset(&assets, "amd64", Some("ubuntu25.04")).unwrap();
+        assert_eq!(got.name, "wrapt_0.2.0_ubuntu25.04_amd64.deb");
+    }
+
+    #[test]
+    fn without_host_match_takes_lowest_os_version() {
+        // An unknown host (e.g. Debian) should get the widest-compatibility build.
+        let assets = vec![
+            asset("wrapt_0.2.0_ubuntu26.04_amd64.deb"),
+            asset("wrapt_0.2.0_ubuntu24.04_amd64.deb"),
+            asset("wrapt_0.2.0_ubuntu25.04_amd64.deb"),
+        ];
+        let got = pick_asset(&assets, "amd64", Some("debian12")).unwrap();
+        assert_eq!(got.name, "wrapt_0.2.0_ubuntu24.04_amd64.deb");
+    }
+
+    #[test]
+    fn untagged_general_deb_wins_as_safest() {
+        let assets = vec![
+            asset("wrapt_0.2.0_ubuntu26.04_amd64.deb"),
+            asset("wrapt_0.2.0_amd64.deb"),
+        ];
+        let got = pick_asset(&assets, "amd64", None).unwrap();
         assert_eq!(got.name, "wrapt_0.2.0_amd64.deb");
     }
 
@@ -212,7 +294,7 @@ mod tests {
     fn falls_back_to_any_deb() {
         let assets = vec![asset("wrapt_0.2.0_all.deb"), asset("notes.txt")];
         assert_eq!(
-            pick_asset(&assets, "amd64").unwrap().name,
+            pick_asset(&assets, "amd64", None).unwrap().name,
             "wrapt_0.2.0_all.deb"
         );
     }
@@ -220,7 +302,16 @@ mod tests {
     #[test]
     fn no_deb_yields_none() {
         let assets = vec![asset("wrapt-0.2.0.tar.gz")];
-        assert!(pick_asset(&assets, "amd64").is_none());
+        assert!(pick_asset(&assets, "amd64", None).is_none());
+    }
+
+    #[test]
+    fn parses_asset_os_version() {
+        assert_eq!(
+            asset_os_version("wrapt_0.2.0_ubuntu24.04_amd64.deb").as_deref(),
+            Some("24.04")
+        );
+        assert_eq!(asset_os_version("wrapt_0.2.0_amd64.deb"), None);
     }
 
     #[test]

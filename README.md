@@ -71,6 +71,28 @@ PREFIX=~/.local ./install.sh
 
 Remove everything with `./install.sh --uninstall`.
 
+### Prebuilt `.deb` packages
+
+Each [release](https://github.com/marc-cr1810/wrapt/releases) ships a `.deb`
+built for every supported Ubuntu version:
+
+| File | Built for |
+| --- | --- |
+| `wrapt_<ver>_ubuntu24.04_amd64.deb` | Ubuntu 24.04 (and newer) |
+| `wrapt_<ver>_ubuntu25.04_amd64.deb` | Ubuntu 25.04 |
+| `wrapt_<ver>_ubuntu26.04_amd64.deb` | Ubuntu 26.04 |
+
+```bash
+sudo apt install ./wrapt_<ver>_ubuntu26.04_amd64.deb
+```
+
+Each package records its real library floor (`libc6`, `libgcc-s1`) in its
+dependencies, so `apt` refuses a package built for a newer system rather than
+letting it crash at runtime. If you're unsure which to pick, the `ubuntu24.04`
+build has the widest compatibility. Better still, once wrapt is installed, let
+it keep itself current — see `wrapt self-update` below, which automatically
+downloads the build matching your system.
+
 ## Usage
 
 Commands that change the system (`install`, `remove`, `upgrade`, …) require root:
