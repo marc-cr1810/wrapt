@@ -137,6 +137,10 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
     let mut conffiles: Vec<String> = Vec::new();
     // Once a prompt appears (interactive), stop hiding and let it through.
     let mut revealing = false;
+    // True once apt's last status was a package completion ("Installed"/"Removed").
+    // apt then goes silent during dpkg trigger processing without sending more
+    // status, so we relabel the (frozen) bar instead of leaving a stale line.
+    let mut last_completion = false;
     loop {
         let mut pfds: Vec<libc::pollfd> = sources
             .iter()
@@ -169,11 +173,24 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
         for src in &mut sources {
             for line in take_lines(&mut src.buf) {
                 match src.kind {
-                    Kind::Status => handle_status(&line, &bar, &mut done, &mut new_conffiles),
+                    Kind::Status => handle_status(
+                        &line,
+                        &bar,
+                        &mut done,
+                        &mut new_conffiles,
+                        &mut last_completion,
+                    ),
                     Kind::Stdout => {
                         if revealing {
                             bar.suspend(|| println!("{line}"));
                         } else if !line.is_empty() {
+                            // apt's status-fd goes silent after the last package's
+                            // "Installed" (80%), but dpkg still writes "Processing
+                            // triggers for ..." here while it works. Reflect that
+                            // so the parked bar reads as active, not stalled.
+                            if last_completion && line.starts_with("Processing triggers") {
+                                bar.set_message("Finishing up...");
+                            }
                             log.push(line);
                         }
                     }
@@ -202,6 +219,13 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
             }
         }
 
+        // apt reports a package as "Installed" at 80% and then works silently
+        // through dpkg's trigger processing, sending no further status. Relabel
+        // the parked bar so that tail reads as active work, not a stale line.
+        if rc == 0 && !revealing && last_completion {
+            bar.set_message("Finishing up...");
+        }
+
         // Interactive and apt has stalled mid-line on something that looks like
         // a question (not just its normal "Building dependency tree..." chatter,
         // which also sits unterminated while apt works). Reveal it so the user
@@ -222,6 +246,11 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
     }
 
     let status = child.wait()?;
+    // apt never sends a final 100% (it stops at the last package's 80%), so set
+    // it ourselves on success — otherwise a captured/non-tty log ends at 80%.
+    if status.success() {
+        bar.set_position(100);
+    }
     bar.finish_and_clear();
 
     if !status.success() {
@@ -277,6 +306,7 @@ fn handle_status(
     bar: &ProgressBar,
     done: &mut HashSet<String>,
     conffiles: &mut Vec<String>,
+    last_completion: &mut bool,
 ) {
     let mut parts = line.splitn(4, ':');
     let kind = parts.next().unwrap_or("");
@@ -287,6 +317,9 @@ fn handle_status(
         "pmstatus" => {
             bar.set_position(percent.round() as u64);
             bar.set_message(strip_arch(msg));
+            // Track whether this milestone completed a package, so a following
+            // silent stretch can be labelled as trigger processing.
+            *last_completion = msg.starts_with("Installed ") || msg.starts_with("Removed ");
             // apt repeats "Installed <pkg>" — print the tick only once.
             if let Some(name) = msg.strip_prefix("Installed ") {
                 if done.insert(pkg.to_string()) {
@@ -401,7 +434,49 @@ fn take_lines(buf: &mut Vec<u8>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_prompt;
+    use super::{handle_status, looks_like_prompt};
+
+    #[test]
+    fn tracks_package_completion_for_trigger_phase() {
+        use indicatif::ProgressBar;
+        use std::collections::HashSet;
+
+        let bar = ProgressBar::hidden();
+        let mut done = HashSet::new();
+        let mut conf = Vec::new();
+        let mut last = false;
+
+        // Mid-package milestones are not completions.
+        handle_status(
+            "pmstatus:htop:60.0000:Configuring htop (amd64)",
+            &bar,
+            &mut done,
+            &mut conf,
+            &mut last,
+        );
+        assert!(!last, "'Configuring' should not count as a completion");
+
+        // "Installed" (the last line apt sends) is what precedes the silent
+        // trigger-processing tail.
+        handle_status(
+            "pmstatus:htop:80.0000:Installed htop (amd64)",
+            &bar,
+            &mut done,
+            &mut conf,
+            &mut last,
+        );
+        assert!(last, "'Installed' should mark a completion");
+
+        // A following package's preparation clears it again (multi-package runs).
+        handle_status(
+            "pmstatus:tree:0.0000:Preparing tree (amd64)",
+            &bar,
+            &mut done,
+            &mut conf,
+            &mut last,
+        );
+        assert!(!last, "next package's 'Preparing' should clear the flag");
+    }
 
     #[test]
     fn apt_progress_chatter_is_not_a_prompt() {
