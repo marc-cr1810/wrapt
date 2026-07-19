@@ -14,9 +14,12 @@ permissions:
 jobs:
   release:
     name: build .deb and publish release
-    runs-on: ubuntu-latest
+    # Build on the OLDEST Ubuntu we support. glibc is backward-compatible, so a
+    # binary linked against 24.04's glibc also runs on 25.04 and 26.04. Pinning
+    # (not `ubuntu-latest`) means a future runner bump can't silently drop 24.04.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Verify tag matches Cargo.toml version
         run: |
