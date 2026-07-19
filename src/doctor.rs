@@ -155,7 +155,7 @@ fn held_packages() -> Check {
             title: format!("{} package(s) held at their current version", held.len()),
             status: Status::Warn,
             detail: held.clone(),
-            fix: Some(format!("wrapt install {} (to unhold)", held.join(" "))),
+            fix: Some(format!("wrapt unhold {}", held.join(" "))),
         }
     }
 }
@@ -204,36 +204,33 @@ fn boot_space() -> Check {
             ),
             status: Status::Warn,
             detail: vec![format!("{kernels} kernel(s) installed")],
-            fix: Some("wrapt autoremove".into()),
+            fix: Some("wrapt clean --kernels".into()),
         },
         _ => ok(&format!("/boot has adequate space ({kernels} kernels)")),
     }
 }
 
-/// Warn on duplicate `deb` entries across the apt sources files.
+/// Warn on duplicate source entries across the apt sources files. Covers both
+/// the classic one-line format and the deb822 `.sources` format (the default on
+/// Ubuntu 24.04+), reusing the same parser as `wrapt repo`.
 fn duplicate_sources() -> Check {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut dupes: BTreeSet<String> = BTreeSet::new();
-    let mut files = vec![std::path::PathBuf::from("/etc/apt/sources.list")];
-    if let Ok(entries) = std::fs::read_dir("/etc/apt/sources.list.d") {
-        files.extend(
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "list")),
-        );
-    }
-    for file in files {
-        let Ok(content) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        for line in content.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            if let Some(rest) = line.strip_prefix("deb ") {
-                let key = rest.split_whitespace().collect::<Vec<_>>().join(" ");
-                if !seen.insert(key.clone()) {
-                    dupes.insert(key);
-                }
+    for (_path, sources) in crate::repo::collect_sources(&crate::repo::apt_dir()) {
+        for s in sources {
+            // Only enabled sources actually fetch; ignore disabled/commented ones.
+            if !s.enabled {
+                continue;
+            }
+            let key = format!(
+                "{} {} {} {}",
+                s.kind,
+                s.uri.trim_end_matches('/'),
+                s.suite,
+                s.components
+            );
+            if !seen.insert(key.clone()) {
+                dupes.insert(key);
             }
         }
     }

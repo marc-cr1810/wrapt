@@ -42,9 +42,18 @@ pub async fn run(apply: bool, count: usize, country: Option<String>) -> Result<(
     }
 
     ui::header("Fetching the mirror list...");
-    let mirrors = mirror_list(country.as_deref()).await?;
+    let mut mirrors = mirror_list(country.as_deref()).await?;
     if mirrors.is_empty() {
         bail!("the mirror list was empty — try again, or pass --country <CC>");
+    }
+
+    // Always benchmark the mirror we're already on, so a switch can only ever
+    // move to something faster — never silently downgrade a good local mirror.
+    let current = current_archive_mirror();
+    if let Some(c) = &current
+        && !mirrors.iter().any(|m| same_mirror(m, c))
+    {
+        mirrors.push(c.clone());
     }
 
     ui::header(&format!(
@@ -73,17 +82,33 @@ pub async fn run(apply: bool, count: usize, country: Option<String>) -> Result<(
         } else {
             format!("{:>2}", i + 1).dimmed().to_string()
         };
+        let tag = if current.as_deref().is_some_and(|c| same_mirror(&p.url, c)) {
+            format!(" {}", "(current)".dimmed())
+        } else {
+            String::new()
+        };
         println!(
-            "  {marker}  {:>11}/s  {}",
+            "  {marker}  {:>11}/s  {}{tag}",
             ui::format_size(speed as u64).green(),
             p.url.cyan()
         );
     }
     println!();
 
-    let fastest = ranked[0].url.clone();
+    // A geolocated list with a single entry is just the fallback archive; a
+    // country list gives something real to choose from.
+    if ranked.len() < 2 && country.is_none() {
+        ui::warn("Only one mirror was found for your location.");
+        println!(
+            "  {} {}",
+            "Try a country list, e.g.".dimmed(),
+            "wrapt fetch --country AU".cyan()
+        );
+    }
+
+    let fastest = ranked[0];
     if !apply {
-        ui::success(&format!("Fastest mirror: {}", fastest.cyan()));
+        ui::success(&format!("Fastest mirror: {}", fastest.url.cyan()));
         println!(
             "  {} {}",
             "Apply it with:".dimmed(),
@@ -92,7 +117,81 @@ pub async fn run(apply: bool, count: usize, country: Option<String>) -> Result<(
         return Ok(());
     }
 
-    apply_mirror(&fastest)
+    decide_and_apply(fastest, &ranked, current.as_deref())
+}
+
+/// Apply the fastest mirror, but only when it's a genuine, meaningful win over
+/// what's already configured — never on a benchmark of one, never a downgrade.
+fn decide_and_apply(fastest: &Probe, ranked: &[&Probe], current: Option<&str>) -> Result<()> {
+    // Nothing to compare against — refuse rather than clobber the current mirror.
+    if ranked.len() < 2 {
+        bail!(
+            "only one mirror responded, so there's nothing to benchmark against — \
+             run `wrapt fetch --country <CC>` (e.g. AU) for a real mirror list"
+        );
+    }
+
+    // Already on the fastest mirror: leave it alone.
+    if let Some(c) = current
+        && same_mirror(&fastest.url, c)
+    {
+        ui::success(&format!(
+            "Your current mirror is already the fastest: {}",
+            c.cyan()
+        ));
+        return Ok(());
+    }
+
+    // If the current mirror responded, only switch for a clear (>10%) speedup —
+    // the measurements are latency-noisy and not worth churning sources over.
+    let current_speed = current.and_then(|c| {
+        ranked
+            .iter()
+            .find(|p| same_mirror(&p.url, c))
+            .and_then(|p| p.speed)
+    });
+    if let Some(cur) = current_speed
+        && fastest.speed.unwrap_or(0.0) < cur * 1.10
+    {
+        ui::success("Your current mirror is within 10% of the fastest — keeping it.");
+        return Ok(());
+    }
+
+    apply_mirror(&fastest.url)
+}
+
+/// The archive mirror currently configured in apt's sources (the first
+/// `archive.ubuntu.com` URI, which excludes the security pocket), if any.
+fn current_archive_mirror() -> Option<String> {
+    let root = apt_dir();
+    for path in [
+        root.join("sources.list.d").join("ubuntu.sources"),
+        root.join("sources.list"),
+    ] {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            for tok in line.split_whitespace() {
+                if (tok.starts_with("http://") || tok.starts_with("https://"))
+                    && tok.contains("archive.ubuntu.com")
+                {
+                    // Normalise to the trailing-slash form the mirror list uses.
+                    let base = tok.trim_end_matches('/');
+                    return Some(format!("{base}/"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Two mirror URLs naming the same location (ignoring a trailing slash).
+fn same_mirror(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
 /// Read `/etc/os-release` (overridable via `WRAPT_OS_RELEASE`) for the distro
@@ -367,5 +466,17 @@ deb http://security.ubuntu.com/ubuntu noble-security main\n";
         let (out, n) = rewrite_archive_uris(text, MIRROR);
         assert_eq!(n, 0);
         assert_eq!(out, text);
+    }
+
+    #[test]
+    fn same_mirror_ignores_trailing_slash() {
+        assert!(same_mirror(
+            "http://au.archive.ubuntu.com/ubuntu",
+            "http://au.archive.ubuntu.com/ubuntu/"
+        ));
+        assert!(!same_mirror(
+            "http://au.archive.ubuntu.com/ubuntu",
+            "http://archive.ubuntu.com/ubuntu"
+        ));
     }
 }

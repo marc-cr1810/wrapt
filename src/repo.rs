@@ -22,23 +22,25 @@ pub fn run(action: RepoCmd) -> Result<()> {
 }
 
 /// One configured source line, however it was written.
-struct Source {
-    kind: String,       // deb | deb-src
-    uri: String,        // http://…
-    suite: String,      // noble, noble-updates, …
-    components: String, // "main universe" (may be empty)
-    enabled: bool,
+pub(crate) struct Source {
+    pub(crate) kind: String,       // deb | deb-src
+    pub(crate) uri: String,        // http://…
+    pub(crate) suite: String,      // noble, noble-updates, …
+    pub(crate) components: String, // "main universe" (may be empty)
+    pub(crate) enabled: bool,
 }
 
-fn apt_dir() -> PathBuf {
+pub(crate) fn apt_dir() -> PathBuf {
     // WRAPT_APT_DIR overrides /etc/apt for testing without touching the system.
     std::env::var_os("WRAPT_APT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/etc/apt"))
 }
 
-fn list() -> Result<()> {
-    let root = apt_dir();
+/// Parse every source under `root` (both `sources.list` and the classic/deb822
+/// files in `sources.list.d`), returning `(path, sources)` for each file that
+/// has any. Shared by `repo list` and `doctor`'s duplicate-source check.
+pub(crate) fn collect_sources(root: &std::path::Path) -> Vec<(PathBuf, Vec<Source>)> {
     let mut files: Vec<(PathBuf, Vec<Source>)> = Vec::new();
 
     let main_list = root.join("sources.list");
@@ -67,6 +69,12 @@ fn list() -> Result<()> {
             }
         }
     }
+    files
+}
+
+fn list() -> Result<()> {
+    let root = apt_dir();
+    let files = collect_sources(&root);
 
     if files.is_empty() {
         ui::warn(&format!(
