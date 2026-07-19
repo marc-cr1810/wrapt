@@ -24,8 +24,10 @@ jobs:
       - name: Install build prerequisites
         run: |
           apt-get update
+          # libstdc++6 is needed by the Node.js the runner injects for JS actions
+          # (checkout, upload-artifact) into these bare Ubuntu containers.
           apt-get install -y --no-install-recommends \
-            ca-certificates curl gcc git make dpkg-dev
+            ca-certificates curl gcc git make dpkg-dev libstdc++6
           # Ubuntu's packaged cargo is too old for edition 2024; use rustup.
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain stable
