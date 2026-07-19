@@ -128,32 +128,39 @@ fn same_named_package(cmd: &str) -> Option<String> {
 
 /// Print the shell hook that routes unknown commands through wrapt.
 pub fn print_hook(shell: Shell) -> Result<()> {
-    let script = match shell {
-        Shell::Bash => {
-            "# wrapt command-not-found handler\n\
-             command_not_found_handle() {\n\
+    // (hook body, rc file to add the enable line to, the enable line itself).
+    let (body, rc, enable) = match shell {
+        Shell::Bash => (
+            "command_not_found_handle() {\n\
              \twrapt command-not-found -- \"$1\"\n\
              \treturn 127\n\
-             }\n"
-        }
-        Shell::Zsh => {
-            "# wrapt command-not-found handler\n\
-             command_not_found_handler() {\n\
+             }\n",
+            "~/.bashrc",
+            "eval \"$(wrapt command-not-found --init bash)\"",
+        ),
+        Shell::Zsh => (
+            "command_not_found_handler() {\n\
              \twrapt command-not-found -- \"$1\"\n\
              \treturn 127\n\
-             }\n"
-        }
-        Shell::Fish => {
-            "# wrapt command-not-found handler\n\
-             function fish_command_not_found\n\
+             }\n",
+            "~/.zshrc",
+            "eval \"$(wrapt command-not-found --init zsh)\"",
+        ),
+        Shell::Fish => (
+            "function fish_command_not_found\n\
              \twrapt command-not-found -- $argv[1]\n\
-             end\n"
-        }
+             end\n",
+            "~/.config/fish/config.fish",
+            "wrapt command-not-found --init fish | source",
+        ),
         other => bail!(
             "no command-not-found hook for {other} — supported shells are bash, zsh, and fish"
         ),
     };
-    print!("{script}");
+    // A leading label, then the hook, then a commented reminder of how to wire
+    // it up — harmless when eval'd, self-documenting when read.
+    print!("# wrapt command-not-found handler\n{body}");
+    print!("#\n# To enable, add the following line to {rc}:\n#   {enable}\n");
     Ok(())
 }
 
