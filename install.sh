@@ -47,13 +47,49 @@ STALE_PATHS=(
 )
 
 # --- argument parsing --------------------------------------------------------
+usage() {
+    cat <<'EOF'
+Installer for wrapt, a faster, prettier front-end for apt.
+
+By default this builds a .deb and installs it with apt, so wrapt becomes a
+normal dpkg-managed package at /usr/bin/wrapt — the same path that
+`wrapt self-update` installs to. That keeps a single canonical copy, so updates
+never leave an older, shadowing binary behind.
+
+Usage:
+  ./install.sh              Build and install the .deb (system-wide)
+  ./install.sh --copy       Install by copying files instead of a .deb
+  ./install.sh --uninstall  Remove wrapt (package or copied files)
+  ./install.sh --help       Show this help
+
+Options:
+  --copy       Copy files into PREFIX instead of building/installing a .deb.
+               Also implied by a custom PREFIX or a system without dpkg/apt.
+  --uninstall  Remove wrapt, whether installed as a package or by copying.
+  -h, --help   Show this help and exit.
+
+Environment (copy method only):
+  PREFIX                 Install prefix for the binary   (default /usr/local)
+  BASH_COMPLETION_DIR    bash completion dir  (default /usr/share/bash-completion/completions)
+  ZSH_COMPLETION_DIR     zsh  completion dir  (default /usr/local/share/zsh/site-functions)
+  FISH_COMPLETION_DIR    fish completion dir  (default /usr/share/fish/vendor_completions.d)
+  MAN_DIR                man page dir         (default PREFIX/share/man/man1)
+
+Examples:
+  ./install.sh                    # normal system-wide install
+  PREFIX=~/.local ./install.sh    # rootless install into ~/.local
+  ./install.sh --uninstall        # remove it again
+EOF
+}
+
 UNINSTALL=0
 FORCE_COPY=0
 for arg in "$@"; do
     case "$arg" in
+        -h|--help)   usage; exit 0 ;;
         --uninstall) UNINSTALL=1 ;;
         --copy)      FORCE_COPY=1 ;;
-        *) printf 'unknown option: %s\n' "$arg" >&2; exit 1 ;;
+        *) printf 'unknown option: %s\nTry: ./install.sh --help\n' "$arg" >&2; exit 1 ;;
     esac
 done
 
