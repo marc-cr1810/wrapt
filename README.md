@@ -39,6 +39,12 @@ pacman's speed and a friendlier face.
 - **Local & remote `.debs`** — `wrapt install ./foo.deb` or an `https://…deb` URL,
   with dependencies resolved by apt as usual.
 - **Source management** — `wrapt repo` lists, adds, and removes apt sources / PPAs.
+- **Fastest mirrors** — `wrapt fetch` benchmarks the Ubuntu mirrors near you and
+  (with `--apply`) switches your archive sources to the fastest, à la `nala fetch`.
+- **Missing-command hints** — an optional shell hook turns "command not found"
+  into "the program 'foo' is not installed — `sudo wrapt install foo`".
+- **Kernel cleanup** — `wrapt clean --kernels` purges old kernels (keeping the
+  running one and the newest) to free up `/boot`.
 - **Safe removal** — warns (and defaults to "no") when a removal would take
   manually-installed packages with it.
 - **Security-aware** — highlights which upgrades are security fixes;
@@ -124,7 +130,7 @@ sudo wrapt upgrade --security-only
 | `wrapt remove <pkgs…> [--purge]` | Remove packages |
 | `wrapt autoremove` | Remove packages that are no longer needed |
 | `wrapt download <pkgs…>` | Download `.deb`s to the current directory (no install) |
-| `wrapt clean [--all]` | Free disk space by clearing the download cache |
+| `wrapt clean [--all] [--kernels]` | Clear the download cache, or purge old kernels (`--kernels`) |
 | `wrapt hold <pkgs…>` / `unhold` / `held` | Pin packages at their current version |
 
 ### History
@@ -154,10 +160,36 @@ sudo wrapt upgrade --security-only
 | Command | Description |
 | --- | --- |
 | `wrapt doctor` | Check the system for common package problems |
+| `wrapt fetch [--apply] [--country CC]` | Benchmark mirrors; `--apply` switches to the fastest |
 | `wrapt repo list` / `add <repo>` / `remove <repo>` | Manage apt sources and PPAs |
 | `wrapt config-diff` | Review config files left by upgrades (`*.dpkg-dist`) |
 | `wrapt completions <shell>` | Print a shell completion script |
 | `wrapt self-update` | Update wrapt itself to the latest release (`--check` to only look) |
+
+### Suggesting packages for unknown commands
+
+wrapt can hook your shell so that typing a command you don't have prints a hint
+on how to install it. Add the hook for your shell:
+
+```bash
+# bash — in ~/.bashrc
+eval "$(wrapt command-not-found --init bash)"
+# zsh — in ~/.zshrc
+eval "$(wrapt command-not-found --init zsh)"
+# fish — in ~/.config/fish/config.fish
+wrapt command-not-found --init fish | source
+```
+
+Then a missing command suggests a package:
+
+```
+$ cowsay
+! the program cowsay is not installed. Install it with:
+  sudo wrapt install cowsay
+```
+
+Suggestions across *all* packages (not just same-named ones) need `apt-file`:
+`wrapt install apt-file && sudo apt-file update`.
 
 ### Keeping wrapt up to date
 

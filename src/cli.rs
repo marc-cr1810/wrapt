@@ -103,6 +103,30 @@ pub enum Command {
         /// Remove every cached .deb, not just ones that can't be re-downloaded
         #[arg(long)]
         all: bool,
+        /// Purge old kernels, keeping the running one and the newest installed
+        #[arg(long)]
+        kernels: bool,
+    },
+    /// Benchmark apt mirrors and switch to the fastest (Ubuntu)
+    Fetch {
+        /// Write the fastest mirror into apt's sources (needs root)
+        #[arg(long)]
+        apply: bool,
+        /// How many top mirrors to display
+        #[arg(long, default_value_t = 10)]
+        count: usize,
+        /// Two-letter country code to pull the mirror list from (e.g. US, DE)
+        #[arg(long)]
+        country: Option<String>,
+    },
+    /// Suggest a package for an unrecognised command (used by the shell hook)
+    #[allow(clippy::enum_variant_names)]
+    CommandNotFound {
+        /// The command that wasn't found
+        command: Option<String>,
+        /// Print the shell hook for SHELL instead of looking up a command
+        #[arg(long, value_name = "SHELL")]
+        init: Option<Shell>,
     },
     /// Explain why a package can't be installed
     WhyNot { package: String },

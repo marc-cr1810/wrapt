@@ -1,11 +1,14 @@
 mod apt;
 mod changelog;
 mod cli;
+mod cnf;
 mod config;
 mod doctor;
 mod download;
 mod exec;
+mod fetch;
 mod history;
+mod kernels;
 mod listpkgs;
 mod lists;
 mod provides;
@@ -126,7 +129,33 @@ async fn run(cli: cli::Cli) -> Result<()> {
             pattern,
         } => listpkgs::run(upgradable, manual, pattern.as_deref(), cli.json),
         Command::Plan { packages } => cmd_plan(&packages),
-        Command::Clean { all } => cmd_clean(all),
+        Command::Clean { all, kernels } => {
+            if kernels {
+                cmd_clean_kernels(opts).await
+            } else {
+                cmd_clean(all)
+            }
+        }
+        Command::Fetch {
+            apply,
+            count,
+            country,
+        } => fetch::run(apply, count, country).await,
+        Command::CommandNotFound { command, init } => {
+            if let Some(shell) = init {
+                cnf::print_hook(shell)
+            } else {
+                let cmd = command.ok_or_else(|| {
+                    anyhow::anyhow!("a command name (or --init <shell>) is required")
+                })?;
+                // The command genuinely wasn't found unless it's on PATH; mirror
+                // the shell's own 127 exit so callers behave correctly.
+                if !cnf::resolve(&cmd) {
+                    std::process::exit(127);
+                }
+                Ok(())
+            }
+        }
         Command::WhyNot { package } => whynot::run(&package),
         Command::Changelog { package } => changelog::run(&package),
         Command::Repo { action } => repo::run(action),
@@ -574,6 +603,20 @@ fn cmd_clean(all: bool) -> Result<()> {
         ui::success(&format!("Freed {}.", ui::format_size(freed).cyan()));
     }
     Ok(())
+}
+
+/// `wrapt clean --kernels`: purge old kernels, keeping the running one and the
+/// newest installed. The removal runs through the normal transaction flow, so
+/// apt shows the plan and asks before anything is deleted.
+async fn cmd_clean_kernels(opts: TxOpts) -> Result<()> {
+    let old = kernels::old_kernel_packages();
+    if old.is_empty() {
+        ui::success("No old kernels to remove — only the running and newest are installed.");
+        return Ok(());
+    }
+    let mut args = vec!["purge".to_string()];
+    args.extend(old.iter().cloned());
+    transaction(args, &old, opts, "Removing old kernels...").await
 }
 
 /// Total size in bytes of the files under `dir` (one level of subdirs deep,

@@ -114,7 +114,9 @@ pub fn simulate(args: &[String]) -> Result<Transaction> {
                     security,
                 });
             }
-            Some("Remv") => {
+            // `Remv` is a plain removal; `purge` simulations emit `Purg` with
+            // the same layout. Treat both as removals.
+            Some("Remv") | Some("Purg") => {
                 let name = tokens.next().unwrap_or_default().to_string();
                 let old = tokens
                     .next()
