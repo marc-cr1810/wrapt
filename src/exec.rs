@@ -174,12 +174,15 @@ pub fn run_with_progress(args: &[String], verbose: bool) -> Result<()> {
             }
         }
 
-        // Interactive and apt has gone quiet mid-line: probably a prompt
-        // waiting for input. Reveal what's buffered so the user can respond.
+        // Interactive and apt has stalled mid-line on something that looks like
+        // a question (not just its normal "Building dependency tree..." chatter,
+        // which also sits unterminated while apt works). Reveal it so the user
+        // can answer. Genuine config-file prompts also arrive via pmstatus above.
         if rc == 0 && interactive && !revealing {
             let stdout_src = sources.iter_mut().find(|s| s.kind == Kind::Stdout).unwrap();
-            if !stdout_src.buf.is_empty() {
-                let pending = String::from_utf8_lossy(&stdout_src.buf).into_owned();
+            let pending = String::from_utf8_lossy(&stdout_src.buf);
+            if looks_like_prompt(&pending) {
+                let pending = pending.into_owned();
                 stdout_src.buf.clear();
                 enter_reveal(&bar);
                 revealing = true;
@@ -285,6 +288,33 @@ fn enter_reveal(bar: &ProgressBar) {
     ui::warn("apt needs your input:");
 }
 
+/// Does a stalled, unterminated stdout buffer look like an interactive prompt
+/// rather than apt's normal in-progress chatter? Kept deliberately strict so
+/// lines like "Building dependency tree..." or "The following NEW packages:"
+/// never trigger a reveal.
+fn looks_like_prompt(buf: &str) -> bool {
+    // Consider only the final unterminated line.
+    let last = buf.rsplit(['\n', '\r']).next().unwrap_or(buf);
+    let t = last.trim_end_matches(' ');
+    if t.is_empty() {
+        return false;
+    }
+    // Explicit yes/no or default-answer markers.
+    if t.contains("[Y/n]") || t.contains("[y/N]") || t.contains("[yes/no]") || t.contains("[default=")
+    {
+        return true;
+    }
+    // A trailing question mark ("...continue? ", conffile "... ? ").
+    if t.ends_with('?') {
+        return true;
+    }
+    // A bracketed default like "... [1]:" or "... [2] " (debconf select).
+    if (t.ends_with("]:") || t.ends_with(']')) && t.contains('[') {
+        return true;
+    }
+    false
+}
+
 /// "htop (amd64) 3.4.1" → "htop 3.4.1"; leaves other text untouched.
 fn strip_arch(s: &str) -> String {
     let mut out = s.to_string();
@@ -336,4 +366,47 @@ fn take_lines(buf: &mut Vec<u8>) -> Vec<String> {
         );
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_prompt;
+
+    #[test]
+    fn apt_progress_chatter_is_not_a_prompt() {
+        // The exact lines that used to trigger a spurious reveal.
+        for line in [
+            "Building dependency tree...",
+            "Reading state information...",
+            "Solving dependencies...",
+            "The following NEW packages will be installed:",
+            "(Reading database ... 45%",
+            "Preparing to unpack .../gcc-16_16_amd64.deb ...",
+            "",
+        ] {
+            assert!(!looks_like_prompt(line), "false positive on: {line:?}");
+        }
+    }
+
+    #[test]
+    fn real_prompts_are_detected() {
+        for line in [
+            "Do you want to continue? [Y/n] ",
+            "Remove obsolete package? [y/N]",
+            "*** file.conf (Y/I/N/O/D/Z) [default=N] ? ",
+            "  What would you like to do about it ? ",
+            "(Enter the item number) [1]: ",
+        ] {
+            assert!(looks_like_prompt(line), "missed prompt: {line:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_last_line_matters() {
+        // Completed lines before the stalled one shouldn't matter.
+        let buf = "Unpacking gcc-16 ...\nSetting up gcc-16 ...\nContinue? [Y/n] ";
+        assert!(looks_like_prompt(buf));
+        let buf = "Continue? [Y/n] yes\nBuilding dependency tree...";
+        assert!(!looks_like_prompt(buf));
+    }
 }
