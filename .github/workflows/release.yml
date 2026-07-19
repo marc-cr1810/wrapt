@@ -1,0 +1,44 @@
+name: Release
+
+# Runs ONLY when a version tag is pushed (e.g. `git tag v0.1.0 && git push --tags`).
+# Ordinary commits and branch pushes never trigger this — see ci.yml for those.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Needed for the job to create a GitHub Release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build .deb and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_ver="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          echo "tag=$tag  Cargo.toml=$cargo_ver"
+          if [ "$tag" != "$cargo_ver" ]; then
+            echo "::error::Tag v$tag does not match Cargo.toml version $cargo_ver — bump Cargo.toml before tagging."
+            exit 1
+          fi
+
+      - name: Run tests
+        run: cargo test --all
+
+      - name: Build .deb
+        run: ./scripts/build-deb.sh
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            target/deb/*.deb \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
