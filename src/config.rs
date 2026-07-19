@@ -17,6 +17,10 @@ pub struct Config {
     pub verbose: Option<bool>,
     /// Colour policy: "auto" (default), "always", or "never".
     pub color: Option<String>,
+    /// GitHub `owner/name` that `self-update` pulls releases from.
+    pub repo: Option<String>,
+    /// After `wrapt upgrade`, check whether a newer wrapt is available.
+    pub notify_updates: Option<bool>,
 }
 
 impl Config {

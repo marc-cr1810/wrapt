@@ -116,6 +116,22 @@ sudo wrapt upgrade --security-only
 | `wrapt doctor` | Check the system for common package problems |
 | `wrapt config-diff` | Review config files left by upgrades (`*.dpkg-dist`) |
 | `wrapt completions <shell>` | Print a shell completion script |
+| `wrapt self-update` | Update wrapt itself to the latest release (`--check` to only look) |
+
+### Keeping wrapt up to date
+
+wrapt is distributed as a `.deb` on [GitHub Releases](https://github.com/marc-cr1810/wrapt/releases),
+not through an apt repository, so `apt upgrade` won't see new versions. Instead:
+
+```sh
+wrapt self-update --check   # report whether a newer release exists (no root needed)
+sudo wrapt self-update      # download and install the latest .deb
+```
+
+It queries the GitHub Releases API, compares the latest tag with the running
+version, and installs the `.deb` matching your architecture. The repository it
+pulls from can be overridden with the `WRAPT_REPO=owner/name` environment
+variable or a `repo = "owner/name"` line in the config file.
 
 ### Global flags
 

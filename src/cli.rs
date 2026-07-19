@@ -124,4 +124,10 @@ pub enum Command {
     Provides { pattern: String },
     /// Check the system for common package problems
     Doctor,
+    /// Update wrapt itself to the latest published release
+    SelfUpdate {
+        /// Only report whether an update is available; don't install it
+        #[arg(long)]
+        check: bool,
+    },
 }

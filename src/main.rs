@@ -9,6 +9,7 @@ mod lists;
 mod provides;
 mod resolve;
 mod restart;
+mod selfupdate;
 mod ui;
 mod why;
 
@@ -60,6 +61,8 @@ async fn run(cli: cli::Cli) -> Result<()> {
     let jobs = cli.parallel.or(cfg.parallel).unwrap_or(5).max(1);
     let verbose = cli.verbose || cfg.verbose.unwrap_or(false);
     let assume_yes = cfg.assume_yes.unwrap_or(false);
+    let repo = selfupdate::resolve_repo(cfg.repo.as_deref());
+    let notify_updates = cfg.notify_updates.unwrap_or(false);
     let opts = TxOpts {
         yes: assume_yes,
         jobs,
@@ -72,7 +75,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
             full,
             security_only,
         } => {
-            cmd_upgrade(
+            let res = cmd_upgrade(
                 full,
                 security_only,
                 TxOpts {
@@ -80,7 +83,12 @@ async fn run(cli: cli::Cli) -> Result<()> {
                     ..opts
                 },
             )
-            .await
+            .await;
+            // Best-effort heads-up that wrapt itself has a newer release.
+            if res.is_ok() && notify_updates {
+                selfupdate::notify_if_outdated(&repo).await;
+            }
+            res
         }
         Command::Install { packages, yes } => {
             let mut args = vec!["install".to_string()];
@@ -163,6 +171,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
         Command::Why { package, all } => cmd_why(&package, all, cli.json),
         Command::Doctor => doctor::run(cli.json),
         Command::Provides { pattern } => provides::run(&pattern),
+        Command::SelfUpdate { check } => selfupdate::run(check, jobs, &repo).await,
         Command::Hold { packages } => cmd_hold(true, &packages),
         Command::Unhold { packages } => cmd_hold(false, &packages),
         Command::Held => cmd_held(),
