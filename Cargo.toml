@@ -1,6 +1,6 @@
 [package]
 name = "wrapt"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "A faster, prettier front-end for apt"
 
