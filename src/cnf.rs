@@ -10,9 +10,9 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 use clap_complete::Shell;
-use owo_colors::OwoColorize;
 
 use crate::ui;
+use crate::ui::Paint;
 
 /// Look up `cmd` and print a suggestion. Returns `true` if the command is in
 /// fact already on PATH (so the caller can exit 0 instead of 127).

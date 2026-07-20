@@ -55,6 +55,39 @@ else
     fail "search --json is not valid JSON"
 fi
 
+echo ":: colour policy"
+# Piped output must be plain; --json consumers and greps depend on it.
+out=$("$WRAPT" held 2>&1)
+assert_missing "$out" $'\033[' "piped output carries no ANSI escapes"
+out=$(NO_COLOR=1 "$WRAPT" held 2>&1)
+assert_missing "$out" $'\033[' "NO_COLOR output carries no ANSI escapes"
+
+echo ":: --json is accepted or refused, never ignored"
+out=$("$WRAPT" --json held 2>&1)
+if printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    pass "held --json parses"
+else
+    fail "held --json is not valid JSON"
+fi
+out=$("$WRAPT" --json show "$PKG" 2>&1)
+assert_has "$out" "not supported" "show --json is refused, not silently ignored"
+
+echo ":: dry runs need no privileges"
+# Run as an unprivileged user to prove the preview paths don't demand root.
+# Confirm the drop actually happened first: if setpriv fails, the "requires
+# root" string is absent for the wrong reason and the check would pass vacuously.
+if id -u nobody >/dev/null 2>&1 && command -v setpriv >/dev/null 2>&1; then
+    drop() { setpriv --reuid=nobody --regid=nogroup --clear-groups "$@" 2>&1; }
+    if [ "$(drop id -u)" != "0" ]; then
+        out=$(drop "$WRAPT" upgrade --security-only --dry-run)
+        assert_missing "$out" "requires root" "upgrade --security-only --dry-run works unprivileged"
+        out=$(drop "$WRAPT" plan "$PKG")
+        assert_missing "$out" "requires root" "plan works unprivileged"
+    else
+        fail "could not drop privileges — unprivileged dry-run checks did not run"
+    fi
+fi
+
 echo ":: install under a PTY (interactive path — reveal-bug regression)"
 # `script` gives wrapt a real terminal, so the interactive reveal logic is live.
 # A fresh install runs dpkg unpack/configure, so any leaked apt chatter shows up.

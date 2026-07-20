@@ -1,8 +1,73 @@
+use std::fmt;
 use std::io::{self, Write};
-
-use owo_colors::OwoColorize;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::apt::Transaction;
+
+/// Whether ANSI escapes are emitted. Decided once at startup by
+/// [`crate::config::Config::apply_color`] from the config, `NO_COLOR`, and
+/// whether stdout is a terminal.
+static COLOR: AtomicBool = AtomicBool::new(false);
+
+pub fn set_color(on: bool) {
+    COLOR.store(on, Ordering::Relaxed);
+}
+
+fn color_enabled() -> bool {
+    COLOR.load(Ordering::Relaxed)
+}
+
+/// A value wrapped in one SGR code, rendered only when colour is enabled.
+pub struct Painted<T> {
+    inner: T,
+    code: &'static str,
+}
+
+impl<T: fmt::Display> fmt::Display for Painted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !color_enabled() {
+            return fmt::Display::fmt(&self.inner, f);
+        }
+        f.write_str("\x1b[")?;
+        f.write_str(self.code)?;
+        f.write_str("m")?;
+        // Forward the formatter so width/alignment applies to the text itself
+        // rather than counting the escape bytes.
+        fmt::Display::fmt(&self.inner, f)?;
+        f.write_str("\x1b[0m")
+    }
+}
+
+/// Colouring that respects the user's colour policy. Deliberately tiny: these
+/// six styles are all wrapt uses, and going through our own trait (rather than
+/// a library's unconditional one) is what makes `color = "never"`, `NO_COLOR`,
+/// and piped output actually come out plain.
+pub trait Paint {
+    fn paint(&self, code: &'static str) -> Painted<&Self> {
+        Painted { inner: self, code }
+    }
+    fn bold(&self) -> Painted<&Self> {
+        self.paint("1")
+    }
+    fn dimmed(&self) -> Painted<&Self> {
+        self.paint("2")
+    }
+    fn red(&self) -> Painted<&Self> {
+        self.paint("31")
+    }
+    fn green(&self) -> Painted<&Self> {
+        self.paint("32")
+    }
+    fn yellow(&self) -> Painted<&Self> {
+        self.paint("33")
+    }
+    fn cyan(&self) -> Painted<&Self> {
+        self.paint("36")
+    }
+}
+
+// Blanket impl, so styles chain (`"x".green().bold()`) the same way they did.
+impl<T: fmt::Display + ?Sized> Paint for T {}
 
 pub fn header(text: &str) {
     println!("{} {}", "::".cyan().bold(), text.bold());

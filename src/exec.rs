@@ -16,9 +16,9 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use owo_colors::OwoColorize;
 
 use crate::ui;
+use crate::ui::Paint;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Kind {
@@ -372,9 +372,17 @@ fn looks_like_prompt(buf: &str) -> bool {
     if t.ends_with('?') {
         return true;
     }
-    // A bracketed default like "... [1]:" or "... [2] " (debconf select).
-    if (t.ends_with("]:") || t.ends_with(']')) && t.contains('[') {
-        return true;
+    // A bracketed default like "... [1]:" or "... [2] " (debconf select). The
+    // brackets must hold a short, space-free token, so apt's own acquire lines
+    // ("Get:1 http://… [1234 kB]") are never mistaken for a question.
+    let core = t.strip_suffix(':').unwrap_or(t);
+    if let Some(core) = core.strip_suffix(']')
+        && let Some(open) = core.rfind('[')
+    {
+        let inside = &core[open + 1..];
+        if !inside.is_empty() && inside.len() <= 8 && !inside.contains(char::is_whitespace) {
+            return true;
+        }
     }
     false
 }
@@ -488,6 +496,9 @@ mod tests {
             "The following NEW packages will be installed:",
             "(Reading database ... 45%",
             "Preparing to unpack .../gcc-16_16_amd64.deb ...",
+            // Acquire lines end in a bracketed size, not a bracketed default.
+            "Get:1 http://archive.ubuntu.com/ubuntu plucky/main amd64 htop [184 kB]",
+            "Hit:2 http://security.ubuntu.com/ubuntu plucky-security InRelease [110 kB]",
             "",
         ] {
             assert!(!looks_like_prompt(line), "false positive on: {line:?}");

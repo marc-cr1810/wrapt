@@ -11,10 +11,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use futures::{StreamExt, stream};
 use indicatif::{ProgressBar, ProgressStyle};
-use owo_colors::OwoColorize;
 use tokio::time::Instant;
 
 use crate::ui;
+use crate::ui::Paint;
 
 /// How many mirrors to probe, and how many to race at once.
 const MAX_MIRRORS: usize = 60;

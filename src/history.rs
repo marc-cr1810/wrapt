@@ -13,8 +13,14 @@ pub struct Entry {
     pub id: u64,
     /// Unix timestamp (seconds).
     pub time: i64,
-    /// The apt-level command that ran, e.g. ["install", "htop"].
+    /// The apt-level command that ran, e.g. ["install", "htop"]. Always kept
+    /// executable, since `redo` replays it verbatim.
     pub command: Vec<String>,
+    /// How the transaction came about, when its command doesn't say it legibly
+    /// (e.g. "undo #5", whose command is a list of pinned versions). Absent in
+    /// history written by older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub install: Vec<Change>,
     pub remove: Vec<Change>,
 }
@@ -26,6 +32,11 @@ impl Entry {
             .single()
             .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "?".to_string())
+    }
+
+    /// The human-facing description of what this transaction did.
+    pub fn what(&self) -> String {
+        self.label.clone().unwrap_or_else(|| self.command.join(" "))
     }
 
     /// e.g. "install htop  (+2 ~1 -0)"
@@ -42,7 +53,7 @@ impl Entry {
         if !self.remove.is_empty() {
             counts.push(format!("-{}", self.remove.len()));
         }
-        format!("{}  ({})", self.command.join(" "), counts.join(" "))
+        format!("{}  ({})", self.what(), counts.join(" "))
     }
 
     pub fn to_transaction(&self) -> Transaction {
@@ -137,15 +148,25 @@ pub fn find(id: Option<u64>) -> Result<Entry> {
     }
 }
 
-pub fn record(command: &[String], tx: &Transaction) -> Result<()> {
+/// The id to give the next transaction: one past the highest seen, *not* one
+/// past the last line's. `load` skips lines it can't parse, so a truncated tail
+/// (a crash or full disk mid-write) would otherwise restart the numbering and
+/// hand out a duplicate id — which `find` resolves to the older entry, making
+/// `undo <id>` revert the wrong transaction.
+fn next_id(entries: &[Entry]) -> u64 {
+    entries.iter().map(|e| e.id).max().map_or(1, |max| max + 1)
+}
+
+pub fn record(command: &[String], label: Option<String>, tx: &Transaction) -> Result<()> {
     let path = history_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
     let entry = Entry {
-        id: load().last().map_or(1, |e| e.id + 1),
+        id: next_id(&load()),
         time: Local::now().timestamp(),
         command: command.to_vec(),
+        label,
         install: tx.install.clone(),
         remove: tx.remove.clone(),
     };
@@ -161,6 +182,54 @@ pub fn record(command: &[String], tx: &Transaction) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(id: u64, command: &[&str], label: Option<&str>) -> Entry {
+        Entry {
+            id,
+            time: 0,
+            command: command.iter().map(|s| s.to_string()).collect(),
+            label: label.map(Into::into),
+            install: vec![],
+            remove: vec![],
+        }
+    }
+
+    #[test]
+    fn next_id_is_one_past_the_highest() {
+        assert_eq!(next_id(&[]), 1);
+        assert_eq!(next_id(&[entry(1, &["install"], None)]), 2);
+        // A dropped/corrupt tail line leaves a lower id last; the next id must
+        // still clear every id on file rather than collide with #3.
+        let recovered = [
+            entry(1, &["install"], None),
+            entry(3, &["upgrade"], None),
+            entry(2, &["remove"], None),
+        ];
+        assert_eq!(next_id(&recovered), 4);
+    }
+
+    #[test]
+    fn summary_prefers_the_label_over_raw_args() {
+        // Undo records a pile of pinned versions; the label is what's legible.
+        let e = entry(
+            7,
+            &["install", "--allow-downgrades", "htop=1"],
+            Some("undo #6"),
+        );
+        assert!(e.summary().starts_with("undo #6"));
+        // Without a label it still falls back to the command (old history files).
+        let e = entry(7, &["install", "htop"], None);
+        assert!(e.summary().starts_with("install htop"));
+    }
+
+    #[test]
+    fn entries_without_a_label_still_parse() {
+        // History written before `label` existed must keep loading.
+        let old = r#"{"id":1,"time":0,"command":["install","htop"],"install":[],"remove":[]}"#;
+        let e: Entry = serde_json::from_str(old).unwrap();
+        assert_eq!(e.label, None);
+        assert_eq!(e.what(), "install htop");
+    }
 
     fn change(name: &str, old: Option<&str>, new: Option<&str>) -> Change {
         Change {
@@ -179,6 +248,7 @@ mod tests {
                 id: 1,
                 time: 0,
                 command: vec!["install".into(), "htop".into()],
+                label: None,
                 install: vec![change("htop", None, Some("1"))],
                 remove: vec![],
             },
@@ -186,6 +256,7 @@ mod tests {
                 id: 2,
                 time: 0,
                 command: vec!["upgrade".into()],
+                label: None,
                 install: vec![change("htop", Some("1"), Some("2"))],
                 remove: vec![change("vlc", Some("3"), None)],
             },

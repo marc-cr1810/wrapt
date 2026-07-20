@@ -1,8 +1,8 @@
 //! `wrapt changelog`: a package's changelog, with security fixes highlighted.
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
+use crate::ui::Paint;
 use crate::{apt, ui};
 
 pub fn run(package: &str) -> Result<()> {
@@ -60,6 +60,10 @@ mod tests {
 
     #[test]
     fn highlights_entry_headers_and_cves() {
+        // Colouring is off unless the policy turns it on, so this test — which
+        // asserts that certain lines get decorated — has to ask for it.
+        crate::ui::set_color(true);
+
         // Header line is recognised (contains parenthesised version).
         assert_ne!(
             render_line("htop (3.4.1-1) noble; urgency=medium"),

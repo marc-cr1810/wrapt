@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use owo_colors::OwoColorize;
+use ui::Paint;
 
 use cli::Command;
 
@@ -60,9 +60,31 @@ fn restore_sigpipe() {
     }
 }
 
+/// Commands that actually emit JSON. Anything else is told so plainly rather
+/// than accepting `--json` and printing its normal output.
+fn supports_json(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Search { .. }
+            | Command::List { .. }
+            | Command::Why { .. }
+            | Command::History { .. }
+            | Command::Doctor
+            | Command::Held
+            | Command::Provides { .. }
+    )
+}
+
 async fn run(cli: cli::Cli) -> Result<()> {
     let cfg = config::Config::load()?;
     cfg.apply_color();
+
+    if cli.json && !supports_json(&cli.command) {
+        anyhow::bail!(
+            "--json is not supported by this command — it works with \
+             search, list, why, history, doctor, held, and provides"
+        );
+    }
 
     // CLI flags win; otherwise fall back to config, then built-in defaults.
     let jobs = cli.parallel.or(cfg.parallel).unwrap_or(5).max(1);
@@ -225,11 +247,11 @@ async fn run(cli: cli::Cli) -> Result<()> {
         Command::Show { package } => cmd_show(&package),
         Command::Why { package, all } => cmd_why(&package, all, cli.json),
         Command::Doctor => doctor::run(cli.json),
-        Command::Provides { pattern } => provides::run(&pattern),
+        Command::Provides { pattern } => provides::run(&pattern, cli.json),
         Command::SelfUpdate { check } => selfupdate::run(check, jobs, &repo).await,
         Command::Hold { packages } => cmd_hold(true, &packages),
         Command::Unhold { packages } => cmd_hold(false, &packages),
-        Command::Held => cmd_held(),
+        Command::Held => cmd_held(cli.json),
         Command::ConfigDiff => resolve::config_diff(),
         Command::Completions { shell } => {
             use clap::CommandFactory;
@@ -265,13 +287,23 @@ fn cmd_hold(hold: bool, packages: &[String]) -> Result<()> {
             packages.join(", ")
         ));
     } else {
-        ui::success(&format!("{verb} {} package(s).", packages.len()));
+        // Report what apt-mark actually changed, not what was asked for —
+        // packages already in the target state aren't touched.
+        ui::success(&format!(
+            "{verb} {} package{}.",
+            changed.len(),
+            if changed.len() == 1 { "" } else { "s" }
+        ));
     }
     Ok(())
 }
 
-fn cmd_held() -> Result<()> {
+fn cmd_held(json: bool) -> Result<()> {
     let held = apt::held();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&held)?);
+        return Ok(());
+    }
     if held.is_empty() {
         ui::success("No packages are held.");
     } else {
@@ -288,9 +320,16 @@ async fn cmd_redo(id: u64, opts: TxOpts) -> Result<()> {
     ui::header(&format!(
         "Re-applying transaction {} ({})",
         entry.id,
-        entry.command.join(" ")
+        entry.what()
     ));
-    transaction(entry.command.clone(), &[], opts, "Re-applying...").await
+    transaction_as(
+        entry.command.clone(),
+        &[],
+        opts,
+        "Re-applying...",
+        Some(format!("redo #{}", entry.id)),
+    )
+    .await
 }
 
 async fn cmd_rollback(id: u64, opts: TxOpts) -> Result<()> {
@@ -309,11 +348,12 @@ async fn cmd_rollback(id: u64, opts: TxOpts) -> Result<()> {
         "Rolling back {} transaction(s) to the state after #{id}",
         entries.len()
     ));
-    transaction(
+    transaction_as(
         history::rollback_args(&entries),
         &[],
         opts,
         "Rolling back...",
+        Some(format!("rollback to #{id}")),
     )
     .await
 }
@@ -335,8 +375,11 @@ async fn cmd_upgrade(full: bool, security_only: bool, opts: TxOpts) -> Result<()
     }
 
     // Security-only: simulate the full upgrade, then upgrade just the packages
-    // whose new version comes from a security pocket.
-    apt::ensure_root()?;
+    // whose new version comes from a security pocket. Like every other dry run,
+    // the preview needs no privileges — only the real transaction does.
+    if !opts.dry_run {
+        apt::ensure_root()?;
+    }
     let tx = apt::simulate(&[op.to_string()])?;
     let security: Vec<String> = tx
         .install
@@ -361,6 +404,19 @@ async fn transaction(
     named: &[String],
     opts: TxOpts,
     action: &str,
+) -> Result<()> {
+    transaction_as(args, named, opts, action, None).await
+}
+
+/// As [`transaction`], but records the run in history under `label` instead of
+/// its raw apt arguments — used by undo/redo/rollback, whose arguments are a
+/// long list of pinned versions that says nothing about where they came from.
+async fn transaction_as(
+    args: Vec<String>,
+    named: &[String],
+    opts: TxOpts,
+    action: &str,
+    label: Option<String>,
 ) -> Result<()> {
     // A dry run only previews; it needs no root and touches nothing.
     if !opts.dry_run {
@@ -410,7 +466,7 @@ async fn transaction(
         );
     }
     exec::run_with_progress(&run_args, opts.verbose)?;
-    if let Err(e) = history::record(&command, &tx) {
+    if let Err(e) = history::record(&command, label, &tx) {
         ui::warn(&format!("could not record history: {e:#}"));
     }
     ui::success("Done.");
@@ -497,19 +553,23 @@ async fn cmd_install(packages: Vec<String>, opts: TxOpts) -> Result<()> {
     let mut args = vec!["install".to_string()];
     let mut named: Vec<String> = Vec::new();
     let mut url_items: Vec<download::DownloadItem> = Vec::new();
-    let mut tmp: Option<PathBuf> = None;
 
+    // Created up front (once) when any spec is a URL, so the download target is
+    // a directory we know we own.
+    let is_url = |s: &str| s.starts_with("http://") || s.starts_with("https://");
+    let tmp: Option<PathBuf> = packages
+        .iter()
+        .any(|s| is_url(s))
+        .then(private_temp_dir)
+        .transpose()?;
+
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for spec in &packages {
-        if spec.starts_with("http://") || spec.starts_with("https://") {
-            let dir = tmp.get_or_insert_with(|| {
-                std::env::temp_dir().join(format!("wrapt-install-{}", std::process::id()))
-            });
-            let filename = spec
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("package.deb")
-                .to_string();
+        if is_url(spec) {
+            let dir = tmp
+                .as_ref()
+                .expect("temp dir created when a URL is present");
+            let filename = unique_name(url_filename(spec), &mut used);
             args.push(dir.join(&filename).to_string_lossy().into_owned());
             url_items.push(download::DownloadItem {
                 url: spec.clone(),
@@ -529,7 +589,6 @@ async fn cmd_install(packages: Vec<String>, opts: TxOpts) -> Result<()> {
 
     // Fetch any remote .debs before handing off to apt.
     if let Some(dir) = &tmp {
-        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
         ui::header(&format!(
             "Fetching {} remote package{}...",
             url_items.len(),
@@ -549,6 +608,65 @@ async fn cmd_install(packages: Vec<String>, opts: TxOpts) -> Result<()> {
 /// True if `spec` points at an existing local `.deb` file.
 fn is_local_deb(spec: &str) -> bool {
     spec.ends_with(".deb") && std::path::Path::new(spec).is_file()
+}
+
+/// A private directory for remote downloads: mode 0700 and created
+/// exclusively, so it can never land on a path someone else pre-created.
+/// `wrapt install` runs as root, so following an unprivileged user's symlink
+/// here would hand them control of where root writes.
+fn private_temp_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let base = std::env::temp_dir();
+    for attempt in 0..8u32 {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos())
+            ^ attempt;
+        let dir = base.join(format!("wrapt-install-{}-{nonce:08x}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            // Someone got there first — try a different name rather than reuse it.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => anyhow::bail!("cannot create {}: {e}", dir.display()),
+        }
+    }
+    anyhow::bail!(
+        "could not create a private temporary directory in {}",
+        base.display()
+    )
+}
+
+/// The file name to save a package URL under: its last path segment, with any
+/// query or fragment dropped. Anything that isn't a plain file name falls back
+/// to a fixed name, so a crafted URL can't steer the path we write to.
+fn url_filename(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let name = path.rsplit('/').next().unwrap_or("");
+    if name.is_empty() || name == "." || name == ".." || name.contains('\0') {
+        return "package.deb".to_string();
+    }
+    name.to_string()
+}
+
+/// Keep file names distinct, so two URLs ending in the same name don't collapse
+/// onto one file (which would silently install the same .deb twice).
+fn unique_name(name: String, used: &mut std::collections::HashSet<String>) -> String {
+    if used.insert(name.clone()) {
+        return name;
+    }
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), ""));
+    for n in 1.. {
+        let candidate = if ext.is_empty() {
+            format!("{stem}-{n}")
+        } else {
+            format!("{stem}-{n}.{ext}")
+        };
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 /// `wrapt plan`: show what installing `packages` would do, then stop.
@@ -593,9 +711,9 @@ async fn cmd_download(packages: &[String], jobs: usize) -> Result<()> {
 /// `wrapt clean`: clear apt's package cache and report the space reclaimed.
 fn cmd_clean(all: bool) -> Result<()> {
     apt::ensure_root()?;
-    let (dir, _custom) = archives_dir();
+    let (dir, custom) = archives_dir();
     let before = dir_size(&dir);
-    apt::clean(all)?;
+    apt::clean(all, custom.then_some(dir.as_path()))?;
     let freed = before.saturating_sub(dir_size(&dir));
     if freed == 0 {
         ui::success("Nothing to clean — the package cache is already empty.");
@@ -655,6 +773,7 @@ fn cmd_history(id: Option<u64>, json: bool) -> Result<()> {
                     "id": e.id,
                     "date": e.date(),
                     "command": e.command,
+                    "label": e.label,
                     "installed": e.install.iter().map(|c| &c.name).collect::<Vec<_>>(),
                     "removed": e.remove.iter().map(|c| &c.name).collect::<Vec<_>>(),
                 })
@@ -670,7 +789,7 @@ fn cmd_history(id: Option<u64>, json: bool) -> Result<()> {
                 "Transaction {} — {} — wrapt {}",
                 entry.id,
                 entry.date(),
-                entry.command.join(" ")
+                entry.what()
             ));
             ui::print_transaction(&entry.to_transaction(), &apt::manual_set());
         }
@@ -704,10 +823,17 @@ async fn cmd_undo(id: Option<u64>, opts: TxOpts) -> Result<()> {
     ui::header(&format!(
         "Undoing transaction {} ({} — {})",
         entry.id,
-        entry.command.join(" "),
+        entry.what(),
         entry.date()
     ));
-    transaction(entry.undo_args(), &[], opts, "Reverting...").await
+    transaction_as(
+        entry.undo_args(),
+        &[],
+        opts,
+        "Reverting...",
+        Some(format!("undo #{}", entry.id)),
+    )
+    .await
 }
 
 fn cmd_update() -> Result<()> {
@@ -758,8 +884,10 @@ async fn cmd_search(query: &str, opts: TxOpts, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Number the rows so an interactive user can pick some to install.
-    let interactive = std::io::stdin().is_terminal();
+    // Number the rows so an interactive user can pick some to install. Both
+    // ends must be a terminal: with stdout piped the numbers are noise and the
+    // prompt would disappear into the pipe.
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let width = results.len().to_string().len();
     for (i, r) in results.iter().enumerate() {
         let version = match &r.version {
@@ -984,5 +1112,52 @@ fn summarize(items: &[String]) -> String {
             items[..MAX].join(", "),
             items.len() - MAX
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn url_filename_takes_a_plain_basename() {
+        assert_eq!(
+            url_filename("https://x.dev/htop_3.4.1_amd64.deb"),
+            "htop_3.4.1_amd64.deb"
+        );
+        // Query strings and fragments are not part of the name.
+        assert_eq!(
+            url_filename("https://x.dev/a/htop.deb?token=abc"),
+            "htop.deb"
+        );
+        assert_eq!(url_filename("https://x.dev/htop.deb#sig"), "htop.deb");
+        // Anything that isn't a plain file name falls back.
+        assert_eq!(url_filename("https://x.dev/pkgs/"), "package.deb");
+        assert_eq!(url_filename("https://x.dev/a/.."), "package.deb");
+        assert_eq!(url_filename("https://x.dev/a/."), "package.deb");
+    }
+
+    #[test]
+    fn unique_name_disambiguates_collisions() {
+        let mut used = HashSet::new();
+        assert_eq!(unique_name("htop.deb".into(), &mut used), "htop.deb");
+        assert_eq!(unique_name("htop.deb".into(), &mut used), "htop-1.deb");
+        assert_eq!(unique_name("htop.deb".into(), &mut used), "htop-2.deb");
+        // Extensionless names still get a suffix.
+        assert_eq!(unique_name("pkg".into(), &mut used), "pkg");
+        assert_eq!(unique_name("pkg".into(), &mut used), "pkg-1");
+    }
+
+    #[test]
+    fn private_temp_dir_is_exclusive_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let a = private_temp_dir().unwrap();
+        let b = private_temp_dir().unwrap();
+        assert_ne!(a, b, "each call must get its own directory");
+        let mode = std::fs::metadata(&a).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "must not be group/world accessible");
+        std::fs::remove_dir(&a).unwrap();
+        std::fs::remove_dir(&b).unwrap();
     }
 }

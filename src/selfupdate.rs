@@ -10,10 +10,10 @@ use std::cmp::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use owo_colors::OwoColorize;
 use serde::Deserialize;
 
 use crate::download::{self, DownloadItem};
+use crate::ui::Paint;
 use crate::{apt, exec, lists, ui};
 
 /// Fallback repository the releases live under. Override at build time with

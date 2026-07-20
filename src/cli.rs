@@ -19,7 +19,7 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
-    /// Emit machine-readable JSON (supported by search, list, why, history, doctor)
+    /// Emit machine-readable JSON (search, list, why, history, doctor, held, provides)
     #[arg(long, global = true)]
     pub json: bool,
 

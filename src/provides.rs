@@ -5,17 +5,20 @@
 use std::process::Command;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use crate::apt;
 use crate::ui;
+use crate::ui::Paint;
 
-pub fn run(pattern: &str) -> Result<()> {
+pub fn run(pattern: &str, json: bool) -> Result<()> {
     // 1. Is it a command already on PATH? Point at its owning package.
     if !pattern.contains('/')
         && let Some(path) = which(pattern)
         && let Some(pkg) = dpkg_owner(&path)
     {
+        if json {
+            return print_json(&[(pkg, path)], &apt::installed_set());
+        }
         ui::header(pattern);
         println!(
             "   {} is provided by {} {}",
@@ -32,6 +35,9 @@ pub fn run(pattern: &str) -> Result<()> {
     let available = apt_file_search(pattern);
 
     if installed.is_empty() && available.is_empty() {
+        if json {
+            return print_json(&[], &apt::installed_set());
+        }
         ui::warn(&format!("No package found providing '{pattern}'."));
         if !apt_file_available() {
             println!(
@@ -46,7 +52,6 @@ pub fn run(pattern: &str) -> Result<()> {
         return Ok(());
     }
 
-    ui::header(&format!("Packages providing '{pattern}'"));
     let installed_set = apt::installed_set();
     let mut shown = std::collections::BTreeSet::new();
     let mut rows: Vec<(String, String)> = Vec::new();
@@ -57,10 +62,16 @@ pub fn run(pattern: &str) -> Result<()> {
     }
     // dpkg/apt-file match on substrings, so a loose pattern can return many
     // files; prefer exact basename matches and cap the rest.
-    rows.sort_by_key(|(_, file)| {
-        let base = file.rsplit('/').next().unwrap_or(file);
-        (base != pattern, file.clone())
+    rows.sort_by(|(_, a), (_, b)| {
+        let base = |f: &str| f.rsplit('/').next().unwrap_or(f) != pattern;
+        (base(a), a).cmp(&(base(b), b))
     });
+
+    if json {
+        return print_json(&rows, &installed_set);
+    }
+
+    ui::header(&format!("Packages providing '{pattern}'"));
     const MAX: usize = 15;
     let total = rows.len();
     for (pkg, file) in rows.iter().take(MAX) {
@@ -78,6 +89,26 @@ pub fn run(pattern: &str) -> Result<()> {
             format!("… and {} more match(es)", total - MAX).dimmed()
         );
     }
+    Ok(())
+}
+
+/// Emit the matches as JSON. Unlike the pretty output this is uncapped — a
+/// consumer can do its own filtering.
+fn print_json(
+    rows: &[(String, String)],
+    installed: &std::collections::HashSet<String>,
+) -> Result<()> {
+    let arr: Vec<_> = rows
+        .iter()
+        .map(|(pkg, file)| {
+            serde_json::json!({
+                "package": pkg,
+                "file": file,
+                "installed": installed.contains(pkg),
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&arr)?);
     Ok(())
 }
 

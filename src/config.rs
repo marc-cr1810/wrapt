@@ -30,23 +30,36 @@ impl Config {
         let Some(path) = config_path() else {
             return Ok(Config::default());
         };
-        match std::fs::read_to_string(&path) {
+        let cfg: Config = match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str(&text)
-                .map_err(|e| anyhow::anyhow!("invalid config at {}: {e}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
+                .map_err(|e| anyhow::anyhow!("invalid config at {}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
+        };
+        // Catch a misspelled policy rather than silently falling back to auto.
+        if let Some(c) = cfg.color.as_deref()
+            && !matches!(c, "auto" | "always" | "never")
+        {
+            anyhow::bail!(
+                "invalid config at {}: color must be \"auto\", \"always\", or \"never\" (got {c:?})",
+                path.display()
+            );
         }
+        Ok(cfg)
     }
 
-    /// Apply the colour policy to the global colouring override. "auto" leaves
-    /// owo-colors to honour tty detection and the NO_COLOR convention.
+    /// Apply the colour policy. "auto" (the default) honours the NO_COLOR
+    /// convention and otherwise colours only when stdout is a terminal, so
+    /// piped or redirected output stays plain.
     pub fn apply_color(&self) {
-        match self.color.as_deref() {
-            Some("always") => owo_colors::set_override(true),
-            Some("never") => owo_colors::set_override(false),
-            _ if std::env::var_os("NO_COLOR").is_some() => owo_colors::set_override(false),
-            _ => {}
-        }
+        use std::io::IsTerminal;
+        let on = match self.color.as_deref() {
+            Some("always") => true,
+            Some("never") => false,
+            _ if std::env::var_os("NO_COLOR").is_some() => false,
+            _ => std::io::stdout().is_terminal(),
+        };
+        crate::ui::set_color(on);
     }
 }
 

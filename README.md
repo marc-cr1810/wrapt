@@ -211,7 +211,13 @@ variable or a `repo = "owner/name"` line in the config file.
 - `-j, --parallel <N>` — number of parallel downloads (default 5)
 - `-v, --verbose` — show apt's raw output instead of the clean display
 - `-n, --dry-run` — show what a command would do, then stop without changing anything
-- `--json` — machine-readable output (`search`, `list`, `why`, `history`, `doctor`)
+- `--json` — machine-readable output (`search`, `list`, `why`, `history`,
+  `doctor`, `held`, `provides`). Other commands reject the flag rather than
+  quietly ignoring it.
+
+Colour is on when stdout is a terminal and off when it's piped or redirected.
+Set `NO_COLOR=1` to force it off, or `color = "auto" | "always" | "never"` in
+the config file to decide explicitly.
 
 ## How it works
 

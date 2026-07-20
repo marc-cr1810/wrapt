@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use std::process::Command;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use crate::ui;
+use crate::ui::Paint;
 
 #[derive(Default)]
 pub struct Report {

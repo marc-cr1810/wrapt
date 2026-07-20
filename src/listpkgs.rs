@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
+use crate::ui::Paint;
 use crate::{apt, ui};
 
 /// List packages. With no flags, every installed package; `upgradable` shows

@@ -3,10 +3,10 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use owo_colors::OwoColorize;
 
 use crate::download::{DownloadItem, ExpectedHash};
 use crate::ui;
+use crate::ui::Paint;
 
 /// One package changed by a transaction. `old` is the currently installed
 /// version (upgrade/removal), `new` the version being installed.
@@ -254,12 +254,15 @@ fn parse_uri_lines(stdout: &str) -> Vec<DownloadItem> {
 
 /// Clear apt's downloaded-package cache. `all` removes every archived .deb
 /// (`clean`); otherwise only ones that can no longer be downloaded (`autoclean`).
-pub fn clean(all: bool) -> Result<()> {
+/// `cache_dir` overrides which archive directory is cleared, so it matches the
+/// one wrapt downloads into (see `WRAPT_CACHE_DIR`).
+pub fn clean(all: bool, cache_dir: Option<&std::path::Path>) -> Result<()> {
     let op = if all { "clean" } else { "autoclean" };
-    let out = apt_get()
-        .arg(op)
-        .output()
-        .context("failed to run apt-get")?;
+    let mut cmd = apt_get();
+    if let Some(dir) = cache_dir {
+        cmd.args(["-o", &format!("Dir::Cache::archives={}", dir.display())]);
+    }
+    let out = cmd.arg(op).output().context("failed to run apt-get")?;
     if !out.status.success() {
         bail!("{}", apt_error(&out.stderr));
     }
@@ -440,7 +443,8 @@ pub fn search(query: &str) -> Result<Vec<SearchResult>> {
         .collect();
 
     // Exact matches first, then name matches, then everything else.
-    results.sort_by_key(|r| (r.name != query, !r.name.contains(query), r.name.clone()));
+    let rank = |r: &SearchResult| (r.name != query, !r.name.contains(query));
+    results.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name)));
     Ok(results)
 }
 

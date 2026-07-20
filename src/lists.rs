@@ -45,7 +45,8 @@ pub fn search(query: &str) -> Result<Vec<SearchResult>> {
             description,
         })
         .collect();
-    results.sort_by_key(|r| (r.name != query, !r.name.contains(&query), r.name.clone()));
+    let rank = |r: &SearchResult| (r.name != query, !r.name.contains(&query));
+    results.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name)));
     Ok(results)
 }
 

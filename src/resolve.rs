@@ -139,7 +139,7 @@ fn damerau(a: &str, b: &str) -> usize {
 /// A `wrapt config-diff` helper lives here too since it's small and related to
 /// the post-upgrade cleanup story.
 pub fn config_diff() -> Result<()> {
-    use owo_colors::OwoColorize;
+    use crate::ui::Paint;
 
     // dpkg leaves the maintainer's new version alongside yours with these
     // suffixes when it can't ask (or you chose to keep your file).

@@ -5,8 +5,8 @@
 //! other transaction's errors — turning apt's terse output into guidance.
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
+use crate::ui::Paint;
 use crate::{apt, resolve, ui};
 
 pub fn run(package: &str) -> Result<()> {

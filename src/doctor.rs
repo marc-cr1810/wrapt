@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 use std::process::Command;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
+
+use crate::ui::Paint;
 
 enum Status {
     Ok,

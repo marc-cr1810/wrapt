@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Result, bail};
-use owo_colors::OwoColorize;
 
 use crate::cli::RepoCmd;
+use crate::ui::Paint;
 use crate::{apt, ui};
 
 pub fn run(action: RepoCmd) -> Result<()> {
