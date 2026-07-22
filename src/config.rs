@@ -2,9 +2,9 @@
 //!
 //! `/etc/wrapt/config.toml` sets machine-wide defaults (a package or an admin
 //! can ship it); `~/.config/wrapt/config.toml` — or `$WRAPT_CONFIG` — is the
-//! user's own and overrides it key by key. Every field is optional, anything
-//! unset falls back to a built-in default, and an explicit CLI flag beats
-//! both files.
+//! user's own and overrides it key by key — except `never_restart`, where the
+//! two lists are unioned. Every field is optional, anything unset falls back to
+//! a built-in default, and an explicit CLI flag beats both files.
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +23,9 @@ pub enum Source {
     Default,
     System,
     User,
+    /// Both layers contributed — only possible for a setting that is unioned
+    /// rather than overridden.
+    Both,
 }
 
 impl Source {
@@ -31,6 +34,7 @@ impl Source {
             Source::Default => "default",
             Source::System => "system",
             Source::User => "user",
+            Source::Both => "system+user",
         }
     }
 }
@@ -87,9 +91,14 @@ impl Config {
         Ok((system, user))
     }
 
-    /// Lay `over` on top of `base`, key by key. `never_restart` replaces rather
-    /// than appends: a user overriding the machine's list means their list, and
-    /// a list you can't shrink would be worse than one you restate.
+    /// Lay `over` on top of `base`, key by key.
+    ///
+    /// `never_restart` is the exception: the two layers are unioned rather than
+    /// replaced. Forgetting to restate a machine-wide entry would silently drop
+    /// a protection, and the costs are lopsided — over-deferring leaves a stale
+    /// library until reboot, while under-deferring is what ends a session. The
+    /// union can only ever protect more, never less, which is the same bias the
+    /// restart guard itself is built on.
     fn merge(base: Config, over: Config) -> Config {
         Config {
             parallel: over.parallel.or(base.parallel),
@@ -98,7 +107,7 @@ impl Config {
             color: over.color.or(base.color),
             repo: over.repo.or(base.repo),
             notify_updates: over.notify_updates.or(base.notify_updates),
-            never_restart: over.never_restart.or(base.never_restart),
+            never_restart: union(base.never_restart, over.never_restart),
             restart: over.restart.or(base.restart),
             keep_kernels: over.keep_kernels.or(base.keep_kernels),
             mirror_country: over.mirror_country.or(base.mirror_country),
@@ -135,81 +144,95 @@ pub fn describe(merged: &Config, system: &Config, user: &Config) -> Vec<(String,
         }
     }
 
-    /// Render a value, falling back to the built-in default. The source column
-    /// already says "default", so the value doesn't repeat it.
-    fn show<T: std::fmt::Display>(v: Option<&T>, default: &str) -> String {
-        v.map(|v| v.to_string())
-            .unwrap_or_else(|| default.to_string())
+    macro_rules! rows {
+        ($($field:ident => $default:expr),* $(,)?) => {{
+            // An exhaustive destructure, so adding a field to Config stops this
+            // compiling until the field is given a default and listed below.
+            // A macro alone wouldn't catch that — this is what makes `--show`
+            // impossible to leave incomplete.
+            let Config { $($field),* } = merged;
+            vec![$((
+                stringify!($field).to_string(),
+                $field
+                    .as_ref()
+                    .map(Render::render)
+                    .unwrap_or_else(|| $default.to_string()),
+                source(user.$field.is_some(), system.$field.is_some()),
+            )),*]
+        }};
     }
 
-    vec![
-        (
-            "parallel".into(),
-            show(merged.parallel.as_ref(), "5"),
-            source(user.parallel.is_some(), system.parallel.is_some()),
-        ),
-        (
-            "assume_yes".into(),
-            show(merged.assume_yes.as_ref(), "false"),
-            source(user.assume_yes.is_some(), system.assume_yes.is_some()),
-        ),
-        (
-            "verbose".into(),
-            show(merged.verbose.as_ref(), "false"),
-            source(user.verbose.is_some(), system.verbose.is_some()),
-        ),
-        (
-            "color".into(),
-            show(merged.color.as_ref(), "auto"),
-            source(user.color.is_some(), system.color.is_some()),
-        ),
-        (
-            "restart".into(),
-            show(merged.restart.as_ref(), "ask"),
-            source(user.restart.is_some(), system.restart.is_some()),
-        ),
-        (
-            "never_restart".into(),
-            merged
-                .never_restart
-                .as_ref()
-                .map(|v| {
-                    if v.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        v.join(", ")
-                    }
-                })
-                .unwrap_or_else(|| "(none)".to_string()),
-            source(user.never_restart.is_some(), system.never_restart.is_some()),
-        ),
-        (
-            "keep_kernels".into(),
-            show(merged.keep_kernels.as_ref(), "2"),
-            source(user.keep_kernels.is_some(), system.keep_kernels.is_some()),
-        ),
-        (
-            "mirror_country".into(),
-            show(merged.mirror_country.as_ref(), "(geolocated)"),
-            source(
-                user.mirror_country.is_some(),
-                system.mirror_country.is_some(),
-            ),
-        ),
-        (
-            "repo".into(),
-            show(merged.repo.as_ref(), crate::selfupdate::DEFAULT_REPO),
-            source(user.repo.is_some(), system.repo.is_some()),
-        ),
-        (
-            "notify_updates".into(),
-            show(merged.notify_updates.as_ref(), "false"),
-            source(
-                user.notify_updates.is_some(),
-                system.notify_updates.is_some(),
-            ),
-        ),
-    ]
+    // Listed in the order they're shown, which needn't match the struct.
+    let mut rows = rows! {
+        parallel => "5",
+        assume_yes => "false",
+        verbose => "false",
+        color => "auto",
+        restart => "ask",
+        never_restart => "(none)",
+        keep_kernels => "2",
+        mirror_country => "(geolocated)",
+        repo => crate::selfupdate::DEFAULT_REPO,
+        notify_updates => "false",
+    };
+
+    // `never_restart` is unioned, so when both layers set it the value really
+    // did come from both. The "user wins" label every other setting uses would
+    // point someone debugging at the wrong file.
+    if user.never_restart.is_some()
+        && system.never_restart.is_some()
+        && let Some(row) = rows.iter_mut().find(|(name, ..)| name == "never_restart")
+    {
+        row.2 = Source::Both;
+    }
+    rows
+}
+
+/// Combine two optional lists, keeping every entry from both. `None` on either
+/// side leaves the other untouched.
+fn union(base: Option<Vec<String>>, over: Option<Vec<String>>) -> Option<Vec<String>> {
+    match (base, over) {
+        (Some(mut a), Some(b)) => {
+            a.extend(b);
+            a.sort();
+            a.dedup();
+            Some(a)
+        }
+        (a, b) => b.or(a),
+    }
+}
+
+/// How a setting's value is displayed by `wrapt config`.
+trait Render {
+    fn render(&self) -> String;
+}
+
+impl Render for usize {
+    fn render(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Render for bool {
+    fn render(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Render for String {
+    fn render(&self) -> String {
+        self.clone()
+    }
+}
+
+impl Render for Vec<String> {
+    fn render(&self) -> String {
+        if self.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.join(", ")
+        }
+    }
 }
 
 /// The commented starter file `wrapt config --init` writes. Every key is
@@ -496,13 +519,53 @@ mod tests {
     }
 
     #[test]
-    fn never_restart_replaces_rather_than_appends() {
+    fn never_restart_unions_both_layers() {
+        // A user adding to the list must not silently drop what the machine
+        // protects — the merge can only ever protect more, never less.
         let system: Config = toml::from_str("never_restart = [\"docker\"]\n").unwrap();
         let user: Config = toml::from_str("never_restart = [\"nginx\"]\n").unwrap();
         let merged = Config::merge(system, user);
         assert_eq!(
             merged.never_restart.as_deref(),
-            Some(["nginx".to_string()].as_slice())
+            Some(["docker".to_string(), "nginx".to_string()].as_slice())
+        );
+        // And it must be attributed to both files, not just the user's.
+        let system: Config = toml::from_str("never_restart = [\"docker\"]\n").unwrap();
+        let user: Config = toml::from_str("never_restart = [\"nginx\"]\n").unwrap();
+        let rows = describe(&merged, &system, &user);
+        let (_, value, source) = rows
+            .iter()
+            .find(|(n, ..)| n == "never_restart")
+            .expect("never_restart is shown");
+        assert_eq!(value, "docker, nginx");
+        assert_eq!(*source, Source::Both);
+    }
+
+    #[test]
+    fn union_deduplicates_and_tolerates_one_sided_lists() {
+        let both = union(
+            Some(vec!["docker".into(), "nginx".into()]),
+            Some(vec!["nginx".into(), "redis".into()]),
+        );
+        assert_eq!(
+            both.as_deref(),
+            Some(
+                [
+                    "docker".to_string(),
+                    "nginx".to_string(),
+                    "redis".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(union(None, None), None);
+        assert_eq!(
+            union(Some(vec!["a".into()]), None).as_deref(),
+            Some(["a".to_string()].as_slice())
+        );
+        assert_eq!(
+            union(None, Some(vec!["b".into()])).as_deref(),
+            Some(["b".to_string()].as_slice())
         );
     }
 

@@ -248,8 +248,11 @@ wrapt reads two optional files and merges them:
 | `~/.config/wrapt/config.toml` | yours, overriding the machine's key by key |
 
 Every setting is optional, anything unset falls back to a built-in default, and
-an explicit CLI flag beats both files. Neither file is created by installing
-wrapt — start one with:
+an explicit CLI flag beats both files. The one exception is `never_restart`,
+where the two lists are combined rather than replaced — so adding a service of
+your own can't silently drop one the machine protects.
+
+Neither file is created by installing wrapt — start one with:
 
 ```bash
 wrapt config --init
