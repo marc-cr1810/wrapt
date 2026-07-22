@@ -44,7 +44,7 @@ pacman's speed and a friendlier face.
 - **Missing-command hints** — an optional shell hook turns "command not found"
   into "the program 'foo' is not installed — `sudo wrapt install foo`".
 - **Kernel cleanup** — `wrapt clean --kernels` purges old kernels (keeping the
-  running one and the newest) to free up `/boot`.
+  newest few and the one you're running) to free up `/boot`.
 - **Safe removal** — warns (and defaults to "no") when a removal would take
   manually-installed packages with it.
 - **Security-aware** — highlights which upgrades are security fixes;
@@ -56,6 +56,8 @@ pacman's speed and a friendlier face.
   low `/boot` space, and duplicate sources.
 - **Helpful errors** — decodes apt's cryptic resolver failures into plain
   English, with did-you-mean suggestions for typos.
+- **Configurable** — `wrapt config` shows every setting in effect and which file
+  it came from; a machine-wide `/etc` file sits under your own.
 - **Scriptable** — `--json` output on query commands, plus shell completions.
 
 ## Requirements
