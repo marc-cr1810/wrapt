@@ -1,10 +1,39 @@
-//! User configuration from `~/.config/wrapt/config.toml` (or `$WRAPT_CONFIG`).
-//! Every field is optional; anything unset falls back to a built-in default,
-//! and any explicit CLI flag overrides the config.
+//! Configuration, read from two optional files and merged.
+//!
+//! `/etc/wrapt/config.toml` sets machine-wide defaults (a package or an admin
+//! can ship it); `~/.config/wrapt/config.toml` — or `$WRAPT_CONFIG` — is the
+//! user's own and overrides it key by key. Every field is optional, anything
+//! unset falls back to a built-in default, and an explicit CLI flag beats
+//! both files.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+/// Machine-wide config, overridable for tests.
+fn system_path() -> PathBuf {
+    std::env::var_os("WRAPT_SYSTEM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/etc/wrapt/config.toml"))
+}
+
+/// Where a setting's value came from, for `wrapt config --show`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    Default,
+    System,
+    User,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Default => "default",
+            Source::System => "system",
+            Source::User => "user",
+        }
+    }
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -39,70 +68,41 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load the config file if present; a missing file is not an error, but a
-    /// malformed one is surfaced so the user can fix it.
+    /// The effective configuration: system defaults with the user's own laid
+    /// over the top. A missing file is not an error, but a malformed one is
+    /// surfaced so the user can fix it.
     pub fn load() -> anyhow::Result<Config> {
-        let Some(path) = config_path() else {
-            return Ok(Config::default());
+        let (system, user) = Self::layers()?;
+        Ok(Config::merge(system, user))
+    }
+
+    /// The two layers, unmerged, so `wrapt config --show` can say where each
+    /// setting came from.
+    pub fn layers() -> anyhow::Result<(Config, Config)> {
+        let system = read_file(&system_path())?;
+        let user = match config_path() {
+            Some(p) => read_file(&p)?,
+            None => Config::default(),
         };
-        if !is_trusted(&path) {
-            crate::ui::warn(&format!(
-                "ignoring {}: it is writable by other users, or owned by \
-                 someone other than you or root",
-                path.display()
-            ));
-            return Ok(Config::default());
+        Ok((system, user))
+    }
+
+    /// Lay `over` on top of `base`, key by key. `never_restart` replaces rather
+    /// than appends: a user overriding the machine's list means their list, and
+    /// a list you can't shrink would be worse than one you restate.
+    fn merge(base: Config, over: Config) -> Config {
+        Config {
+            parallel: over.parallel.or(base.parallel),
+            assume_yes: over.assume_yes.or(base.assume_yes),
+            verbose: over.verbose.or(base.verbose),
+            color: over.color.or(base.color),
+            repo: over.repo.or(base.repo),
+            notify_updates: over.notify_updates.or(base.notify_updates),
+            never_restart: over.never_restart.or(base.never_restart),
+            restart: over.restart.or(base.restart),
+            keep_kernels: over.keep_kernels.or(base.keep_kernels),
+            mirror_country: over.mirror_country.or(base.mirror_country),
         }
-        let cfg: Config = match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text)
-                .map_err(|e| anyhow::anyhow!("invalid config at {}: {e}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
-        };
-        // Catch a misspelled policy rather than silently falling back to auto.
-        if let Some(c) = cfg.color.as_deref()
-            && !matches!(c, "auto" | "always" | "never")
-        {
-            anyhow::bail!(
-                "invalid config at {}: color must be \"auto\", \"always\", or \"never\" (got {c:?})",
-                path.display()
-            );
-        }
-        // A blank entry would silently match nothing; say so rather than
-        // leaving the user believing a service is protected.
-        if let Some(names) = cfg.never_restart.as_deref()
-            && names.iter().any(|n| n.trim().is_empty())
-        {
-            anyhow::bail!(
-                "invalid config at {}: never_restart must not contain empty names",
-                path.display()
-            );
-        }
-        if let Some(r) = cfg.restart.as_deref()
-            && !matches!(r, "ask" | "auto" | "never")
-        {
-            anyhow::bail!(
-                "invalid config at {}: restart must be \"ask\", \"auto\", or \"never\" (got {r:?})",
-                path.display()
-            );
-        }
-        // Zero would mean purging every kernel, including one you can boot.
-        if cfg.keep_kernels == Some(0) {
-            anyhow::bail!(
-                "invalid config at {}: keep_kernels must be at least 1",
-                path.display()
-            );
-        }
-        if let Some(cc) = cfg.mirror_country.as_deref()
-            && !(cc.len() == 2 && cc.chars().all(|c| c.is_ascii_alphabetic()))
-        {
-            anyhow::bail!(
-                "invalid config at {}: mirror_country must be a two-letter \
-                 country code like \"AU\" (got {cc:?})",
-                path.display()
-            );
-        }
-        Ok(cfg)
     }
 
     /// Apply the colour policy. "auto" (the default) honours the NO_COLOR
@@ -118,6 +118,267 @@ impl Config {
         };
         crate::ui::set_color(on);
     }
+}
+
+/// Every setting, its effective value, and which layer supplied it. Built by
+/// pairing each field of the merged config with the layers it came from, so
+/// `--show` can't drift out of step with what `load` actually returns.
+pub fn describe(merged: &Config, system: &Config, user: &Config) -> Vec<(String, String, Source)> {
+    /// Which layer won for one field, given whether each layer set it.
+    fn source(user_set: bool, system_set: bool) -> Source {
+        if user_set {
+            Source::User
+        } else if system_set {
+            Source::System
+        } else {
+            Source::Default
+        }
+    }
+
+    /// Render a value, falling back to the built-in default. The source column
+    /// already says "default", so the value doesn't repeat it.
+    fn show<T: std::fmt::Display>(v: Option<&T>, default: &str) -> String {
+        v.map(|v| v.to_string())
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    vec![
+        (
+            "parallel".into(),
+            show(merged.parallel.as_ref(), "5"),
+            source(user.parallel.is_some(), system.parallel.is_some()),
+        ),
+        (
+            "assume_yes".into(),
+            show(merged.assume_yes.as_ref(), "false"),
+            source(user.assume_yes.is_some(), system.assume_yes.is_some()),
+        ),
+        (
+            "verbose".into(),
+            show(merged.verbose.as_ref(), "false"),
+            source(user.verbose.is_some(), system.verbose.is_some()),
+        ),
+        (
+            "color".into(),
+            show(merged.color.as_ref(), "auto"),
+            source(user.color.is_some(), system.color.is_some()),
+        ),
+        (
+            "restart".into(),
+            show(merged.restart.as_ref(), "ask"),
+            source(user.restart.is_some(), system.restart.is_some()),
+        ),
+        (
+            "never_restart".into(),
+            merged
+                .never_restart
+                .as_ref()
+                .map(|v| {
+                    if v.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        v.join(", ")
+                    }
+                })
+                .unwrap_or_else(|| "(none)".to_string()),
+            source(user.never_restart.is_some(), system.never_restart.is_some()),
+        ),
+        (
+            "keep_kernels".into(),
+            show(merged.keep_kernels.as_ref(), "2"),
+            source(user.keep_kernels.is_some(), system.keep_kernels.is_some()),
+        ),
+        (
+            "mirror_country".into(),
+            show(merged.mirror_country.as_ref(), "(geolocated)"),
+            source(
+                user.mirror_country.is_some(),
+                system.mirror_country.is_some(),
+            ),
+        ),
+        (
+            "repo".into(),
+            show(merged.repo.as_ref(), crate::selfupdate::DEFAULT_REPO),
+            source(user.repo.is_some(), system.repo.is_some()),
+        ),
+        (
+            "notify_updates".into(),
+            show(merged.notify_updates.as_ref(), "false"),
+            source(
+                user.notify_updates.is_some(),
+                system.notify_updates.is_some(),
+            ),
+        ),
+    ]
+}
+
+/// The commented starter file `wrapt config --init` writes. Every key is
+/// present but commented out, so the file documents itself without freezing
+/// today's defaults into a user's config.
+const TEMPLATE: &str = "\
+# wrapt configuration. Uncomment a line to change it; anything left commented
+# uses the built-in default. A command-line flag always wins over this file.
+#
+# A machine-wide file at /etc/wrapt/config.toml is read first, and anything
+# set here overrides it.
+
+# Number of packages to download at once.
+#parallel = 5
+
+# Skip confirmation prompts, as if -y were always passed.
+#assume_yes = false
+
+# Show apt's raw output instead of wrapt's progress display.
+#verbose = false
+
+# Colour: \"auto\" follows the terminal and NO_COLOR, or force \"always\"/\"never\".
+#color = \"auto\"
+
+# Services still using upgraded-out libraries after an upgrade:
+#   \"ask\"   prompt to restart them (default)
+#   \"auto\"  restart them without asking
+#   \"never\" only report them
+# wrapt never restarts your display manager, the unit owning a live login
+# session, dbus, systemd-logind or polkit, whatever this is set to.
+#restart = \"ask\"
+
+# Extra services to leave alone -- safe to restart, but costly to interrupt.
+# Names work with or without the .service suffix.
+#never_restart = [\"docker\", \"postgresql\"]
+
+# How many kernels `clean --kernels` keeps, newest first. The running kernel
+# is always kept as well. Below 2 you have no fallback if a kernel won't boot.
+#keep_kernels = 2
+
+# Two-letter country code for `fetch` to pull its mirror list from. Worth
+# setting if `fetch` finds only a handful of mirrors.
+#mirror_country = \"AU\"
+
+# Where `self-update` looks for new releases, as owner/name.
+#repo = \"marc-cr1810/wrapt\"
+
+# Mention a newer wrapt after `upgrade`.
+#notify_updates = false
+";
+
+/// The user config path, for `wrapt config`. `None` when no home is resolvable.
+pub fn user_config_path() -> Option<PathBuf> {
+    config_path()
+}
+
+/// The machine-wide config path, for `wrapt config`.
+pub fn machine_config_path() -> PathBuf {
+    system_path()
+}
+
+/// Write the commented starter config to `path`, creating parent directories.
+/// Refuses to overwrite an existing file. When run under sudo, the result is
+/// handed to the invoking user so they can edit it without root.
+pub fn write_template(path: &Path) -> anyhow::Result<()> {
+    if path.exists() {
+        anyhow::bail!(
+            "{} already exists — edit it, or delete it first",
+            path.display()
+        );
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", parent.display()))?;
+        chown_to_invoker(parent);
+    }
+    std::fs::write(path, TEMPLATE)
+        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
+    chown_to_invoker(path);
+    Ok(())
+}
+
+/// Give a path back to the user who invoked sudo. Without this, `sudo wrapt
+/// config --init` would leave a root-owned file in their home that they'd need
+/// root to edit. Best-effort: a failure here isn't worth failing the command.
+fn chown_to_invoker(path: &Path) {
+    let (Some(uid), Some(gid)) = (env_id("SUDO_UID"), env_id("SUDO_GID")) else {
+        return;
+    };
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return;
+    };
+    // SAFETY: c_path is a valid NUL-terminated string for the duration of the
+    // call; chown only reads it.
+    unsafe {
+        libc::chown(c_path.as_ptr(), uid, gid);
+    }
+}
+
+fn env_id(var: &str) -> Option<u32> {
+    std::env::var(var).ok()?.parse().ok()
+}
+
+/// Read and validate one config file. Absent (or untrusted) yields defaults.
+fn read_file(path: &Path) -> anyhow::Result<Config> {
+    if !is_trusted(path) {
+        crate::ui::warn(&format!(
+            "ignoring {}: it is writable by other users, or owned by \
+             someone other than you or root",
+            path.display()
+        ));
+        return Ok(Config::default());
+    }
+    let cfg: Config = match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("invalid config at {}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+        Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
+    };
+    validate(&cfg, path)?;
+    Ok(cfg)
+}
+
+/// Reject values that would otherwise fail silently or dangerously later.
+fn validate(cfg: &Config, path: &Path) -> anyhow::Result<()> {
+    // Catch a misspelled policy rather than silently falling back to auto.
+    if let Some(c) = cfg.color.as_deref()
+        && !matches!(c, "auto" | "always" | "never")
+    {
+        anyhow::bail!(
+            "invalid config at {}: color must be \"auto\", \"always\", or \"never\" (got {c:?})",
+            path.display()
+        );
+    }
+    // A blank entry would silently match nothing; say so rather than leaving
+    // the user believing a service is protected.
+    if let Some(names) = cfg.never_restart.as_deref()
+        && names.iter().any(|n| n.trim().is_empty())
+    {
+        anyhow::bail!(
+            "invalid config at {}: never_restart must not contain empty names",
+            path.display()
+        );
+    }
+    if let Some(r) = cfg.restart.as_deref()
+        && !matches!(r, "ask" | "auto" | "never")
+    {
+        anyhow::bail!(
+            "invalid config at {}: restart must be \"ask\", \"auto\", or \"never\" (got {r:?})",
+            path.display()
+        );
+    }
+    // Zero would mean purging every kernel, including one you can boot.
+    if cfg.keep_kernels == Some(0) {
+        anyhow::bail!(
+            "invalid config at {}: keep_kernels must be at least 1",
+            path.display()
+        );
+    }
+    if let Some(cc) = cfg.mirror_country.as_deref()
+        && !(cc.len() == 2 && cc.chars().all(|c| c.is_ascii_alphabetic()))
+    {
+        anyhow::bail!(
+            "invalid config at {}: mirror_country must be a two-letter \
+             country code like \"AU\" (got {cc:?})",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -217,6 +478,54 @@ mod tests {
     #[test]
     fn unknown_key_is_rejected() {
         assert!(toml::from_str::<Config>("parralel = 8\n").is_err());
+    }
+
+    #[test]
+    fn user_layer_overrides_system_key_by_key() {
+        let system: Config =
+            toml::from_str("parallel = 8\nkeep_kernels = 4\nrestart = \"auto\"\n").unwrap();
+        let user: Config = toml::from_str("keep_kernels = 2\n").unwrap();
+        let merged = Config::merge(system, user);
+        // Overridden by the user.
+        assert_eq!(merged.keep_kernels, Some(2));
+        // Untouched by the user, so the system value survives.
+        assert_eq!(merged.parallel, Some(8));
+        assert_eq!(merged.restart.as_deref(), Some("auto"));
+        // Set by neither: still unset, for the built-in default to fill.
+        assert_eq!(merged.mirror_country, None);
+    }
+
+    #[test]
+    fn never_restart_replaces_rather_than_appends() {
+        let system: Config = toml::from_str("never_restart = [\"docker\"]\n").unwrap();
+        let user: Config = toml::from_str("never_restart = [\"nginx\"]\n").unwrap();
+        let merged = Config::merge(system, user);
+        assert_eq!(
+            merged.never_restart.as_deref(),
+            Some(["nginx".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn describe_attributes_each_setting_to_its_layer() {
+        let system: Config = toml::from_str("parallel = 8\nrestart = \"auto\"\n").unwrap();
+        let user: Config = toml::from_str("restart = \"never\"\n").unwrap();
+        let merged = Config::merge(
+            toml::from_str("parallel = 8\nrestart = \"auto\"\n").unwrap(),
+            toml::from_str("restart = \"never\"\n").unwrap(),
+        );
+        let rows = describe(&merged, &system, &user);
+        let find = |name: &str| {
+            rows.iter()
+                .find(|(n, ..)| n == name)
+                .map(|(_, v, s)| (v.clone(), *s))
+                .unwrap()
+        };
+        assert_eq!(find("restart"), ("never".to_string(), Source::User));
+        assert_eq!(find("parallel"), ("8".to_string(), Source::System));
+        let (value, source) = find("keep_kernels");
+        assert_eq!(source, Source::Default);
+        assert_eq!(value, "2");
     }
 
     #[test]

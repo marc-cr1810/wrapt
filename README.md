@@ -163,6 +163,7 @@ sudo wrapt upgrade --security-only
 | `wrapt doctor` | Check the system for common package problems |
 | `wrapt fetch [--apply] [--country CC]` | Benchmark mirrors; `--apply` switches to the fastest |
 | `wrapt repo list` / `add <repo>` / `remove <repo>` | Manage apt sources and PPAs |
+| `wrapt config` | Show the effective settings and where each came from (`--init` to create one) |
 | `wrapt config-diff` | Review config files left by upgrades (`*.dpkg-dist`) |
 | `wrapt completions <shell>` | Print a shell completion script |
 | `wrapt self-update` | Update wrapt itself to the latest release (`--check` to only look) |
@@ -239,8 +240,37 @@ without the `.service` suffix.
 
 ## Configuration
 
-wrapt reads `~/.config/wrapt/config.toml` (or `$WRAPT_CONFIG`). Every setting is
-optional, and an explicit CLI flag always wins over the file.
+wrapt reads two optional files and merges them:
+
+| | |
+| --- | --- |
+| `/etc/wrapt/config.toml` | machine-wide, for an admin to set defaults for everyone |
+| `~/.config/wrapt/config.toml` | yours, overriding the machine's key by key |
+
+Every setting is optional, anything unset falls back to a built-in default, and
+an explicit CLI flag beats both files. Neither file is created by installing
+wrapt — start one with:
+
+```bash
+wrapt config --init
+```
+
+That writes a fully-commented template with every setting in it, so nothing is
+set until you uncomment it. To see what's actually in effect and which file each
+value came from — the fastest way to work out why a setting isn't applying:
+
+```bash
+wrapt config
+```
+
+```
+:: Effective settings:
+   parallel        8                            (system)
+   restart         never                        (user)
+   keep_kernels    2                            (default)
+```
+
+`wrapt config --path` prints just the two paths.
 
 Your config is used under `sudo` too. Because sudo resets `HOME` to root's,
 wrapt resolves the invoking user from `SUDO_USER` and reads *their* config —

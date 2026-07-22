@@ -256,6 +256,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
         Command::Hold { packages } => cmd_hold(true, &packages),
         Command::Unhold { packages } => cmd_hold(false, &packages),
         Command::Held => cmd_held(cli.json),
+        Command::Config { init, path } => cmd_config(init, path),
         Command::ConfigDiff => resolve::config_diff(),
         Command::Completions { shell } => {
             use clap::CommandFactory;
@@ -482,6 +483,70 @@ async fn transaction_as(
         restart::offer(&report, opts.yes)?;
     }
     Ok(())
+}
+
+/// `wrapt config`: show the effective settings and where each came from, print
+/// the paths, or write a starter file.
+fn cmd_config(init: bool, path_only: bool) -> Result<()> {
+    let user_path = config::user_config_path();
+    let system_path = config::machine_config_path();
+
+    if init {
+        let Some(target) = user_path else {
+            anyhow::bail!("cannot work out where your config should go (no HOME)");
+        };
+        config::write_template(&target)?;
+        ui::success(&format!("Wrote a starter config to {}", target.display()));
+        println!(
+            "   {}",
+            "Every setting is commented out — uncomment what you want to change.".dimmed()
+        );
+        return Ok(());
+    }
+
+    if path_only {
+        println!("system  {}", system_path.display());
+        match &user_path {
+            Some(p) => println!("user    {}", p.display()),
+            None => println!("user    (no HOME — none read)"),
+        }
+        return Ok(());
+    }
+
+    let (system, user) = config::Config::layers()?;
+    let merged = config::Config::load()?;
+
+    ui::header("Configuration files:");
+    println!(
+        "   {:7} {} {}",
+        "system",
+        system_path.display(),
+        exists_note(&system_path)
+    );
+    match &user_path {
+        Some(p) => println!("   {:7} {} {}", "user", p.display(), exists_note(p)),
+        None => println!("   {:7} {}", "user", "(no HOME — none read)".dimmed()),
+    }
+    println!();
+
+    ui::header("Effective settings:");
+    for (name, value, source) in config::describe(&merged, &system, &user) {
+        println!(
+            "   {:<15} {:<28} {}",
+            name,
+            value,
+            format!("({})", source.label()).dimmed()
+        );
+    }
+    Ok(())
+}
+
+fn exists_note(path: &std::path::Path) -> String {
+    if path.exists() {
+        String::new()
+    } else {
+        "(not present)".dimmed().to_string()
+    }
 }
 
 /// Print a transaction's plan: the package changes, any collateral-removal

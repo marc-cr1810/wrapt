@@ -172,6 +172,15 @@ pub enum Command {
     Unhold { packages: Vec<String> },
     /// List held packages
     Held,
+    /// Show the effective configuration, or create a starter config file
+    Config {
+        /// Write a commented starter config to your user config path
+        #[arg(long)]
+        init: bool,
+        /// Print only the paths wrapt reads configuration from
+        #[arg(long)]
+        path: bool,
+    },
     /// Review configuration files left behind by upgrades (*.dpkg-dist)
     ConfigDiff,
     /// Generate a shell completion script
