@@ -157,25 +157,79 @@ fn next_id(entries: &[Entry]) -> u64 {
     entries.iter().map(|e| e.id).max().map_or(1, |max| max + 1)
 }
 
+/// How many transactions to keep. The log is append-only, so without a bound it
+/// grows for the life of the machine and every write re-parses all of it. A
+/// thousand entries is years of ordinary use, and well past anything anyone
+/// rolls back to.
+const MAX_ENTRIES: usize = 1000;
+
+/// How many of the oldest entries to drop to make room for one more.
+fn overflow(len: usize, max: usize) -> usize {
+    (len + 1).saturating_sub(max)
+}
+
 pub fn record(command: &[String], label: Option<String>, tx: &Transaction) -> Result<()> {
     let path = history_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
+    let mut entries = load();
     let entry = Entry {
-        id: next_id(&load()),
+        // Still one past the highest id of what we keep, so pruning the oldest
+        // entries can't hand out an id twice.
+        id: next_id(&entries),
         time: Local::now().timestamp(),
         command: command.to_vec(),
         label,
         install: tx.install.clone(),
         remove: tx.remove.clone(),
     };
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+
+    let drop_count = overflow(entries.len(), MAX_ENTRIES);
+    if drop_count == 0 {
+        // The ordinary path: one more line on the end.
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+        return Ok(());
+    }
+    entries.drain(..drop_count);
+    entries.push(entry);
+    rewrite(&path, &entries)
+}
+
+/// Replace the history with `entries`, atomically. Written to a sibling
+/// temporary file and renamed into place, so an interrupted prune leaves the
+/// previous history intact rather than a half-written one — this is the file
+/// `undo` depends on.
+fn rewrite(path: &std::path::Path, entries: &[Entry]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let tmp = path.with_extension("jsonl.tmp");
+    let write = || -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(&tmp)
+            .with_context(|| format!("cannot open {}", tmp.display()))?;
+        for entry in entries {
+            writeln!(file, "{}", serde_json::to_string(entry)?)?;
+        }
+        // Flush to disk before the rename, so a crash can't leave the new name
+        // pointing at an empty or partial file.
+        file.sync_all()?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
     Ok(())
 }
 
@@ -206,6 +260,67 @@ mod tests {
             entry(2, &["remove"], None),
         ];
         assert_eq!(next_id(&recovered), 4);
+    }
+
+    #[test]
+    fn overflow_drops_only_once_the_cap_is_reached() {
+        // Below the cap, nothing is dropped and the append path is used.
+        assert_eq!(overflow(0, 3), 0);
+        assert_eq!(overflow(1, 3), 0);
+        // At len == max - 1 the new entry exactly fills the cap.
+        assert_eq!(overflow(2, 3), 0);
+        // At the cap, one must go to make room.
+        assert_eq!(overflow(3, 3), 1);
+        // A file already over the cap (an older wrapt, or a lowered cap) is
+        // brought back down rather than merely held steady.
+        assert_eq!(overflow(10, 3), 8);
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_and_never_reuses_an_id() {
+        let entries: Vec<Entry> = (1..=5).map(|i| entry(i, &["install"], None)).collect();
+        let next = next_id(&entries);
+        assert_eq!(next, 6);
+
+        // Simulate what `record` does at a cap of 3.
+        let mut kept = entries;
+        let drop_count = overflow(kept.len(), 3);
+        kept.drain(..drop_count);
+        kept.push(entry(next, &["install"], None));
+
+        let ids: Vec<u64> = kept.iter().map(|e| e.id).collect();
+        assert_eq!(ids, [4, 5, 6], "oldest go first, newest survive");
+        // The id after pruning still clears everything kept.
+        assert_eq!(next_id(&kept), 7);
+    }
+
+    #[test]
+    fn rewrite_replaces_the_file_atomically() {
+        let dir = std::env::temp_dir().join(format!("wrapt-hist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.jsonl");
+        std::fs::write(&path, "{\"corrupt\n").unwrap();
+
+        let entries = vec![
+            entry(7, &["install", "htop"], None),
+            entry(8, &["upgrade"], None),
+        ];
+        rewrite(&path, &entries).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.contains("\"id\":7") && text.contains("\"id\":8"));
+        // The temporary file must not be left behind.
+        assert!(!path.with_extension("jsonl.tmp").exists());
+
+        // And what was written parses back to what went in.
+        let back: Vec<Entry> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        assert_eq!(back.iter().map(|e| e.id).collect::<Vec<_>>(), [7, 8]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

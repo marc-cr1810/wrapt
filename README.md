@@ -143,6 +143,10 @@ sudo wrapt upgrade --security-only
 | `wrapt redo <id>` | Re-apply a past transaction |
 | `wrapt rollback <id>` | Undo everything after transaction `id` |
 
+Transactions are recorded in `/var/lib/wrapt/history.jsonl`, one line each. The
+most recent 1000 are kept — years of ordinary use — and older entries are
+dropped as new ones arrive, so the log can't grow without bound.
+
 ### Discovery
 
 | Command | Description |
