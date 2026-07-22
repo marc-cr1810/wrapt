@@ -39,7 +39,7 @@ impl Source {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Default number of parallel downloads.
@@ -93,6 +93,12 @@ impl Config {
             None => Config::default(),
         };
         Ok((system, user))
+    }
+
+    /// The effective config from layers already read, so a caller that needs
+    /// both the layers and the result doesn't read the files twice.
+    pub fn effective(system: &Config, user: &Config) -> Config {
+        Config::merge(system.clone(), user.clone())
     }
 
     /// Lay `over` on top of `base`, key by key.
@@ -347,14 +353,30 @@ fn env_id(var: &str) -> Option<u32> {
     std::env::var(var).ok()?.parse().ok()
 }
 
-/// Read and validate one config file. Absent (or untrusted) yields defaults.
-fn read_file(path: &Path) -> anyhow::Result<Config> {
-    if !is_trusted(path) {
+/// Warn about an untrusted config once per path, per process. The config is
+/// read more than once in a single command — at startup, and again by `wrapt
+/// config` — and repeating one warning three times reads like three problems.
+fn warn_untrusted(path: &Path) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static SEEN: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let Ok(mut seen) = SEEN.get_or_init(|| Mutex::new(HashSet::new())).lock() else {
+        return;
+    };
+    if seen.insert(path.to_path_buf()) {
         crate::ui::warn(&format!(
             "ignoring {}: it is writable by other users, or owned by \
              someone other than you or root",
             path.display()
         ));
+    }
+}
+
+/// Read and validate one config file. Absent (or untrusted) yields defaults.
+fn read_file(path: &Path) -> anyhow::Result<Config> {
+    if !is_trusted(path) {
+        warn_untrusted(path);
         return Ok(Config::default());
     }
     let cfg: Config = match std::fs::read_to_string(path) {

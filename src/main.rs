@@ -517,7 +517,7 @@ fn cmd_config(init: bool, path_only: bool) -> Result<()> {
     }
 
     let (system, user) = config::Config::layers()?;
-    let merged = config::Config::load()?;
+    let merged = config::Config::effective(&system, &user);
 
     ui::header("Configuration files:");
     println!(
