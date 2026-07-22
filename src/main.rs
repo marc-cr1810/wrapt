@@ -78,6 +78,10 @@ fn supports_json(command: &Command) -> bool {
 async fn run(cli: cli::Cli) -> Result<()> {
     let cfg = config::Config::load()?;
     cfg.apply_color();
+    restart::set_policy(restart::Policy {
+        mode: restart::Mode::from_config(cfg.restart.as_deref()),
+        never_restart: cfg.never_restart.clone().unwrap_or_default(),
+    });
 
     if cli.json && !supports_json(&cli.command) {
         anyhow::bail!(
@@ -153,7 +157,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
         Command::Plan { packages } => cmd_plan(&packages),
         Command::Clean { all, kernels } => {
             if kernels {
-                cmd_clean_kernels(opts).await
+                cmd_clean_kernels(opts, cfg.keep_kernels.unwrap_or(2)).await
             } else {
                 cmd_clean(all)
             }
@@ -162,7 +166,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
             apply,
             count,
             country,
-        } => fetch::run(apply, count, country).await,
+        } => fetch::run(apply, count, country.or(cfg.mirror_country.clone())).await,
         Command::CommandNotFound { command, init } => {
             if let Some(shell) = init {
                 cnf::print_hook(shell)
@@ -726,10 +730,12 @@ fn cmd_clean(all: bool) -> Result<()> {
 /// `wrapt clean --kernels`: purge old kernels, keeping the running one and the
 /// newest installed. The removal runs through the normal transaction flow, so
 /// apt shows the plan and asks before anything is deleted.
-async fn cmd_clean_kernels(opts: TxOpts) -> Result<()> {
-    let old = kernels::old_kernel_packages();
+async fn cmd_clean_kernels(opts: TxOpts, keep: usize) -> Result<()> {
+    let old = kernels::old_kernel_packages(keep);
     if old.is_empty() {
-        ui::success("No old kernels to remove — only the running and newest are installed.");
+        ui::success(&format!(
+            "No old kernels to remove — the newest {keep} (and the running one) are all that's installed."
+        ));
         return Ok(());
     }
     let mut args = vec!["purge".to_string()];

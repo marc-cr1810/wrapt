@@ -50,7 +50,8 @@ pacman's speed and a friendlier face.
 - **Security-aware** — highlights which upgrades are security fixes;
   `upgrade --security-only` applies just those.
 - **Restart detection** — after upgrades, finds services still using outdated
-  libraries and offers to restart them.
+  libraries and offers to restart them, skipping any whose restart would log you
+  out or break the system.
 - **`doctor`** — a health check for broken packages, held packages, orphans,
   low `/boot` space, and duplicate sources.
 - **Helpful errors** — decodes apt's cryptic resolver failures into plain
@@ -218,6 +219,61 @@ variable or a `repo = "owner/name"` line in the config file.
 Colour is on when stdout is a terminal and off when it's piped or redirected.
 Set `NO_COLOR=1` to force it off, or `color = "auto" | "always" | "never"` in
 the config file to decide explicitly.
+
+### Service restarts
+
+After an upgrade, wrapt lists the running services still using libraries that
+were replaced, and offers to restart them in one step.
+
+Some services are never restarted, because doing so would take your session or
+the system down with them: your display manager (resolved from
+`display-manager.service`, so whichever one you run), the unit owning any live
+login session — including `sshd` when you're connected over SSH — `dbus`,
+`systemd-logind`, and `polkit`. These are reported instead, and take effect on
+your next reboot.
+
+Daemons that are safe to restart but costly to interrupt — a database, a
+container runtime — are wrapt's to restart but yours to decide about. List them
+in `never_restart` (see below) and they're left alone too; names work with or
+without the `.service` suffix.
+
+## Configuration
+
+wrapt reads `~/.config/wrapt/config.toml` (or `$WRAPT_CONFIG`). Every setting is
+optional, and an explicit CLI flag always wins over the file.
+
+Your config is used under `sudo` too. Because sudo resets `HOME` to root's,
+wrapt resolves the invoking user from `SUDO_USER` and reads *their* config —
+otherwise none of these settings would apply to the commands that need root,
+which is most of them. Running as root, wrapt ignores a config file that is
+group- or world-writable, or owned by someone other than you or root.
+
+```toml
+parallel = 5                  # parallel downloads
+assume_yes = false            # skip confirmation prompts
+verbose = false               # show apt's raw output
+color = "auto"                # "auto" | "always" | "never"
+
+restart = "ask"               # "ask" | "auto" | "never" — services after upgrades
+never_restart = ["docker"]    # services to leave alone on top of the automatic ones
+
+keep_kernels = 2              # how many kernels `clean --kernels` keeps
+mirror_country = "AU"         # country for `fetch` to pull its mirror list from
+
+repo = "marc-cr1810/wrapt"    # where `self-update` looks for releases
+notify_updates = false        # mention a newer wrapt after `upgrade`
+```
+
+A few notes on the less obvious ones:
+
+- **`restart = "never"`** outranks `-y`. Assuming yes to package prompts isn't
+  the same as consenting to bounce services, so the two are kept separate.
+- **`keep_kernels`** counts from the newest. The kernel you're running is always
+  kept on top of it, so booting an older kernel never puts it at risk. The
+  default of 2 leaves a fallback if a new kernel fails to boot.
+- **`mirror_country`** is worth setting if `fetch` finds few mirrors: the
+  geolocated list sometimes returns only `archive.ubuntu.com` for a given
+  egress IP, and a two-letter code pulls the full national list instead.
 
 ## How it works
 
