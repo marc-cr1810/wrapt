@@ -70,7 +70,13 @@ pub trait Paint {
 impl<T: fmt::Display + ?Sized> Paint for T {}
 
 pub fn header(text: &str) {
-    println!("{} {}", "::".cyan().bold(), text.bold());
+    println!("{}", header_line(text));
+}
+
+/// The rendered form of [`header`], so output built into a string matches what
+/// is printed directly.
+pub fn header_line(text: &str) -> String {
+    format!("{} {}", "::".cyan().bold(), text.bold())
 }
 
 pub fn success(text: &str) {
@@ -78,7 +84,12 @@ pub fn success(text: &str) {
 }
 
 pub fn warn(text: &str) {
-    eprintln!("{} {}", "!".yellow().bold(), text.yellow());
+    eprintln!("{}", warn_line(text));
+}
+
+/// The rendered form of [`warn`], for output assembled into a string.
+pub fn warn_line(text: &str) -> String {
+    format!("{} {}", "!".yellow().bold(), text.yellow())
 }
 
 pub fn error(text: &str) {
@@ -169,6 +180,15 @@ fn parse_selection(input: &str, count: usize) -> Vec<usize> {
 /// `manual` names the packages apt considers manually installed, so removals of
 /// packages the user chose can be flagged.
 pub fn print_transaction(tx: &Transaction, manual: &std::collections::HashSet<String>) {
+    print!("{}", render_transaction(tx, manual));
+}
+
+/// The transaction plan as text. Split from printing so the exact rendering —
+/// which is most of what wrapt is for — can be asserted in tests rather than
+/// only ever checked by eye.
+pub fn render_transaction(tx: &Transaction, manual: &std::collections::HashSet<String>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     let (upgrades, installs): (Vec<_>, Vec<_>) = tx.install.iter().partition(|c| c.old.is_some());
 
     let name_width = tx
@@ -180,10 +200,15 @@ pub fn print_transaction(tx: &Transaction, manual: &std::collections::HashSet<St
         .unwrap_or(0);
 
     if !installs.is_empty() {
-        header(&format!("Installing ({})", installs.len()));
+        let _ = writeln!(
+            out,
+            "{}",
+            header_line(&format!("Installing ({})", installs.len()))
+        );
         for c in &installs {
             let name = format!("{:name_width$}", c.name);
-            println!(
+            let _ = writeln!(
+                out,
                 "   {}  {}",
                 name.bold(),
                 c.new.as_deref().unwrap_or("?").green()
@@ -197,7 +222,7 @@ pub fn print_transaction(tx: &Transaction, manual: &std::collections::HashSet<St
         } else {
             format!("Upgrading ({})", upgrades.len())
         };
-        header(&title);
+        let _ = writeln!(out, "{}", header_line(&title));
         for c in &upgrades {
             let name = format!("{:name_width$}", c.name);
             let badge = if c.security {
@@ -205,7 +230,8 @@ pub fn print_transaction(tx: &Transaction, manual: &std::collections::HashSet<St
             } else {
                 String::new()
             };
-            println!(
+            let _ = writeln!(
+                out,
                 "   {}  {} {} {}{badge}",
                 name.bold(),
                 c.old.as_deref().unwrap_or("?").dimmed(),
@@ -215,7 +241,11 @@ pub fn print_transaction(tx: &Transaction, manual: &std::collections::HashSet<St
         }
     }
     if !tx.remove.is_empty() {
-        header(&format!("Removing ({})", tx.remove.len()));
+        let _ = writeln!(
+            out,
+            "{}",
+            header_line(&format!("Removing ({})", tx.remove.len()))
+        );
         for c in &tx.remove {
             let name = format!("{:name_width$}", c.name);
             // Flag removals of packages the user installed on purpose.
@@ -224,12 +254,144 @@ pub fn print_transaction(tx: &Transaction, manual: &std::collections::HashSet<St
             } else {
                 String::new()
             };
-            println!(
+            let _ = writeln!(
+                out,
                 "   {}  {}{badge}",
                 name.red().bold(),
                 c.old.as_deref().unwrap_or("?").dimmed()
             );
         }
+    }
+    out
+}
+
+/// Colour is process-wide state, and tests run in parallel, so any test that
+/// asserts on rendered text must hold this lock for its duration — otherwise
+/// another test toggling colour mid-render makes the assertion flaky.
+#[cfg(test)]
+pub(crate) mod test_color {
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// Force plain output and keep it that way until the guard drops. A
+    /// poisoned lock is recovered rather than propagated: a panic in an
+    /// unrelated test shouldn't cascade into every rendering test.
+    pub(crate) fn plain() -> MutexGuard<'static, ()> {
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        super::set_color(false);
+        guard
+    }
+
+    /// As [`plain`], but with colour on.
+    pub(crate) fn coloured() -> MutexGuard<'static, ()> {
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        super::set_color(true);
+        guard
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::test_color::{coloured, plain};
+    use super::*;
+    use crate::apt::Change;
+    use std::collections::HashSet;
+
+    fn change(name: &str, old: Option<&str>, new: Option<&str>, security: bool) -> Change {
+        Change {
+            name: name.to_string(),
+            old: old.map(Into::into),
+            new: new.map(Into::into),
+            security,
+        }
+    }
+
+    #[test]
+    fn renders_installs_upgrades_and_removals_aligned() {
+        let _guard = plain();
+        let tx = Transaction {
+            install: vec![
+                change("htop", None, Some("3.4.1"), false),
+                change("libssl3", Some("3.0.1"), Some("3.0.2"), false),
+            ],
+            remove: vec![change("nano", Some("7.2"), None, false)],
+        };
+        // Names pad to the widest across every section, so the columns line up.
+        assert_eq!(
+            render_transaction(&tx, &HashSet::new()),
+            ":: Installing (1)\n\
+             \x20  htop     3.4.1\n\
+             :: Upgrading (1)\n\
+             \x20  libssl3  3.0.1 → 3.0.2\n\
+             :: Removing (1)\n\
+             \x20  nano     7.2\n"
+        );
+    }
+
+    #[test]
+    fn security_upgrades_are_counted_and_badged() {
+        let _guard = plain();
+        let tx = Transaction {
+            install: vec![
+                change("openssl", Some("3.0.1"), Some("3.0.2"), true),
+                change("curl", Some("8.1"), Some("8.2"), false),
+            ],
+            remove: vec![],
+        };
+        let out = render_transaction(&tx, &HashSet::new());
+        assert!(
+            out.starts_with(":: Upgrading (2, 1 security)\n"),
+            "header should count security upgrades: {out}"
+        );
+        assert!(out.contains("openssl  3.0.1 → 3.0.2 🔒 security"));
+        // The non-security upgrade carries no badge.
+        assert!(out.contains("curl     8.1 → 8.2\n"));
+    }
+
+    #[test]
+    fn removing_a_manually_installed_package_is_flagged() {
+        let _guard = plain();
+        let tx = Transaction {
+            install: vec![],
+            remove: vec![
+                change("ripgrep", Some("14.1"), None, false),
+                change("libfoo", Some("1.0"), None, false),
+            ],
+        };
+        let manual: HashSet<String> = ["ripgrep".to_string()].into_iter().collect();
+        let out = render_transaction(&tx, &manual);
+        assert!(out.contains("ripgrep  14.1 (you installed this)"));
+        // A dependency pulled in automatically gets no warning.
+        assert!(out.contains("libfoo   1.0\n"));
+    }
+
+    #[test]
+    fn an_empty_transaction_renders_nothing() {
+        let _guard = plain();
+        let tx = Transaction {
+            install: vec![],
+            remove: vec![],
+        };
+        assert_eq!(render_transaction(&tx, &HashSet::new()), "");
+    }
+
+    #[test]
+    fn colour_is_emitted_only_when_enabled() {
+        let tx = Transaction {
+            install: vec![change("htop", None, Some("3.4.1"), false)],
+            remove: vec![],
+        };
+        let with_colour = {
+            let _guard = coloured();
+            render_transaction(&tx, &HashSet::new())
+        };
+        let _guard = plain();
+        let plain_out = render_transaction(&tx, &HashSet::new());
+        assert!(with_colour.contains('\x1b'), "should carry escapes when on");
+        assert!(!plain_out.contains('\x1b'), "must be clean when off");
+        // Padding must measure the text, not the escape bytes.
+        assert!(plain_out.contains("   htop  3.4.1\n"));
     }
 }
 

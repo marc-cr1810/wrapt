@@ -238,6 +238,81 @@ pub fn check() -> Report {
     .split_deferred(&guard)
 }
 
+/// Whether to restart without asking, or `None` when the user must be prompted.
+/// Split out so the precedence rule is testable: an explicit `restart = "never"`
+/// outranks `-y`, because assuming yes to package prompts is not consent to
+/// bounce services.
+fn auto_decision(mode: Mode, yes: bool) -> Option<bool> {
+    match mode {
+        Mode::Never => Some(false),
+        Mode::Auto => Some(true),
+        Mode::Ask if yes => Some(true),
+        Mode::Ask => None,
+    }
+}
+
+/// The list of services needing a restart, as shown before the prompt.
+pub fn render_pending(report: &Report) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{}",
+        ui::header_line(&format!(
+            "{} service{} need restarting (using outdated libraries):",
+            report.services.len(),
+            if report.services.len() == 1 { "" } else { "s" }
+        ))
+    );
+    for svc in &report.services {
+        let _ = writeln!(out, "   {}", svc.yellow());
+    }
+    let _ = writeln!(out);
+    out
+}
+
+/// What is shown when the restart is declined or suppressed.
+pub fn render_skip(report: &Report) -> String {
+    format!(
+        "   {} {}\n",
+        "skip — restart later with:".dimmed(),
+        format!("systemctl restart {}", report.services.join(" ")).cyan()
+    )
+}
+
+/// The block for services wrapt refuses to restart. Rendered whole rather than
+/// split across streams, so piping stdout can't strip the warning from the list
+/// it applies to.
+pub fn render_deferred(report: &Report) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let one = report.deferred.len() == 1;
+    let _ = writeln!(
+        out,
+        "{}",
+        ui::warn_line(&format!(
+            "{} service{} also updated, but wrapt will not restart {}:",
+            report.deferred.len(),
+            if one { "" } else { "s" },
+            if one { "it" } else { "them" },
+        ))
+    );
+    for svc in &report.deferred {
+        let _ = writeln!(out, "   {}", svc.yellow());
+    }
+    let _ = writeln!(
+        out,
+        "   {}",
+        "Restarting these would end your session or interrupt something you rely on.".dimmed()
+    );
+    let _ = writeln!(
+        out,
+        "   {}",
+        "They take effect on your next reboot.".dimmed()
+    );
+    out
+}
+
 /// Show the report and, with the user's consent, restart the services.
 pub fn offer(report: &Report, yes: bool) -> Result<()> {
     if report.is_empty() {
@@ -245,23 +320,9 @@ pub fn offer(report: &Report, yes: bool) -> Result<()> {
     }
 
     if !report.services.is_empty() {
-        ui::header(&format!(
-            "{} service{} need restarting (using outdated libraries):",
-            report.services.len(),
-            if report.services.len() == 1 { "" } else { "s" }
-        ));
-        for svc in &report.services {
-            println!("   {}", svc.yellow());
-        }
-        println!();
-
-        // An explicit `restart = "never"` outranks -y: assuming yes to package
-        // prompts shouldn't be read as consent to bounce services.
-        let restart_now = match policy().mode {
-            Mode::Never => false,
-            Mode::Auto => true,
-            Mode::Ask => yes || ui::confirm("Restart them now?", true),
-        };
+        print!("{}", render_pending(report));
+        let restart_now = auto_decision(policy().mode, yes)
+            .unwrap_or_else(|| ui::confirm("Restart them now?", true));
         if restart_now {
             for svc in &report.services {
                 print!("   restarting {svc} ... ");
@@ -280,36 +341,13 @@ pub fn offer(report: &Report, yes: bool) -> Result<()> {
                 );
             }
         } else {
-            println!(
-                "   {} {}",
-                "skip — restart later with:".dimmed(),
-                format!("systemctl restart {}", report.services.join(" ")).cyan()
-            );
+            print!("{}", render_skip(report));
         }
     }
 
     if !report.deferred.is_empty() {
-        ui::warn(&format!(
-            "{} service{} also updated, but wrapt will not restart {}:",
-            report.deferred.len(),
-            if report.deferred.len() == 1 { "" } else { "s" },
-            if report.deferred.len() == 1 {
-                "it"
-            } else {
-                "them"
-            },
-        ));
-        for svc in &report.deferred {
-            println!("   {}", svc.yellow());
-        }
-        println!(
-            "   {}",
-            "Restarting these would end your session or interrupt something you \
-             rely on."
-                .dimmed()
-        );
-        println!("   {}", "They take effect on your next reboot.".dimmed());
-        println!();
+        eprint!("{}", render_deferred(report));
+        eprintln!();
     }
 
     if report.kernel_reboot {
@@ -540,6 +578,66 @@ NEEDRESTART-SVC: cups.service
         // Substring lookalikes must not be caught by the display-manager rules.
         assert!(!bare_guard().is_deferred("gdm-helper.service"));
         assert!(!bare_guard().is_deferred("dbus-monitor-exporter.service"));
+    }
+
+    use crate::ui::test_color::plain;
+
+    fn report(services: &[&str], deferred: &[&str]) -> Report {
+        Report {
+            services: services.iter().map(|s| s.to_string()).collect(),
+            deferred: deferred.iter().map(|s| s.to_string()).collect(),
+            kernel_reboot: false,
+        }
+    }
+
+    #[test]
+    fn renders_the_pending_list() {
+        let _guard = plain();
+        assert_eq!(
+            render_pending(&report(&["cups.service", "nginx.service"], &[])),
+            ":: 2 services need restarting (using outdated libraries):\n\
+             \x20  cups.service\n\
+             \x20  nginx.service\n\
+             \n"
+        );
+        // Singular is not "1 services".
+        assert!(render_pending(&report(&["cups.service"], &[])).starts_with(":: 1 service need"));
+    }
+
+    #[test]
+    fn renders_the_skip_hint_with_a_runnable_command() {
+        let _guard = plain();
+        assert_eq!(
+            render_skip(&report(&["cups.service", "nginx.service"], &[])),
+            "   skip — restart later with: systemctl restart cups.service nginx.service\n"
+        );
+    }
+
+    #[test]
+    fn renders_the_deferred_block() {
+        let _guard = plain();
+        // The output that would have told the user gdm was left alone.
+        assert_eq!(
+            render_deferred(&report(&[], &["gdm.service"])),
+            "! 1 service also updated, but wrapt will not restart it:\n\
+             \x20  gdm.service\n\
+             \x20  Restarting these would end your session or interrupt something you rely on.\n\
+             \x20  They take effect on your next reboot.\n"
+        );
+        // Plural agreement across the sentence.
+        let two = render_deferred(&report(&[], &["dbus.service", "gdm.service"]));
+        assert!(two.starts_with("! 2 services also updated, but wrapt will not restart them:"));
+    }
+
+    #[test]
+    fn restart_never_outranks_assume_yes() {
+        // The precedence that keeps -y from being read as consent to bounce
+        // services. None means "ask the user".
+        assert_eq!(auto_decision(Mode::Never, true), Some(false));
+        assert_eq!(auto_decision(Mode::Never, false), Some(false));
+        assert_eq!(auto_decision(Mode::Auto, false), Some(true));
+        assert_eq!(auto_decision(Mode::Ask, true), Some(true));
+        assert_eq!(auto_decision(Mode::Ask, false), None);
     }
 
     #[test]
