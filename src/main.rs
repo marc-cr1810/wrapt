@@ -101,6 +101,7 @@ async fn run(cli: cli::Cli) -> Result<()> {
         jobs,
         verbose,
         dry_run: cli.dry_run,
+        history_limit: cfg.history_limit.unwrap_or(1000),
     };
     match cli.command {
         Command::Update => cmd_update(),
@@ -371,6 +372,8 @@ struct TxOpts {
     verbose: bool,
     /// Show the plan and stop, without downloading or changing anything.
     dry_run: bool,
+    /// How many transactions the history keeps.
+    history_limit: usize,
 }
 
 async fn cmd_upgrade(full: bool, security_only: bool, opts: TxOpts) -> Result<()> {
@@ -471,7 +474,7 @@ async fn transaction_as(
         );
     }
     exec::run_with_progress(&run_args, opts.verbose)?;
-    if let Err(e) = history::record(&command, label, &tx) {
+    if let Err(e) = history::record(&command, label, &tx, opts.history_limit) {
         ui::warn(&format!("could not record history: {e:#}"));
     }
     ui::success("Done.");

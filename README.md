@@ -145,7 +145,8 @@ sudo wrapt upgrade --security-only
 
 Transactions are recorded in `/var/lib/wrapt/history.jsonl`, one line each. The
 most recent 1000 are kept — years of ordinary use — and older entries are
-dropped as new ones arrive, so the log can't grow without bound.
+dropped as new ones arrive, so the log can't grow without bound. Set
+`history_limit` in the config file to keep more or fewer.
 
 ### Discovery
 
@@ -295,6 +296,7 @@ restart = "ask"               # "ask" | "auto" | "never" — services after upgr
 never_restart = ["docker"]    # services to leave alone on top of the automatic ones
 
 keep_kernels = 2              # how many kernels `clean --kernels` keeps
+history_limit = 1000          # how many transactions the history keeps
 mirror_country = "AU"         # country for `fetch` to pull its mirror list from
 
 repo = "marc-cr1810/wrapt"    # where `self-update` looks for releases

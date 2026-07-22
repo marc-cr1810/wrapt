@@ -157,18 +157,22 @@ fn next_id(entries: &[Entry]) -> u64 {
     entries.iter().map(|e| e.id).max().map_or(1, |max| max + 1)
 }
 
-/// How many transactions to keep. The log is append-only, so without a bound it
-/// grows for the life of the machine and every write re-parses all of it. A
-/// thousand entries is years of ordinary use, and well past anything anyone
-/// rolls back to.
-const MAX_ENTRIES: usize = 1000;
-
-/// How many of the oldest entries to drop to make room for one more.
-fn overflow(len: usize, max: usize) -> usize {
-    (len + 1).saturating_sub(max)
+/// How many of the oldest entries to drop to make room for one more. A `limit`
+/// of zero is treated as one: config validation rejects it, but a caller
+/// passing it shouldn't be able to discard the entry it just recorded.
+fn overflow(len: usize, limit: usize) -> usize {
+    (len + 1).saturating_sub(limit.max(1))
 }
 
-pub fn record(command: &[String], label: Option<String>, tx: &Transaction) -> Result<()> {
+/// Append a transaction, keeping at most `limit` of them. The log would
+/// otherwise grow for the life of the machine, and every write re-parses all of
+/// it — so the bound protects write cost as much as disk.
+pub fn record(
+    command: &[String],
+    label: Option<String>,
+    tx: &Transaction,
+    limit: usize,
+) -> Result<()> {
     let path = history_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
@@ -185,7 +189,7 @@ pub fn record(command: &[String], label: Option<String>, tx: &Transaction) -> Re
         remove: tx.remove.clone(),
     };
 
-    let drop_count = overflow(entries.len(), MAX_ENTRIES);
+    let drop_count = overflow(entries.len(), limit);
     if drop_count == 0 {
         // The ordinary path: one more line on the end.
         let mut file = OpenOptions::new()
@@ -267,13 +271,25 @@ mod tests {
         // Below the cap, nothing is dropped and the append path is used.
         assert_eq!(overflow(0, 3), 0);
         assert_eq!(overflow(1, 3), 0);
-        // At len == max - 1 the new entry exactly fills the cap.
+        // At len == limit - 1 the new entry exactly fills the cap.
         assert_eq!(overflow(2, 3), 0);
         // At the cap, one must go to make room.
         assert_eq!(overflow(3, 3), 1);
-        // A file already over the cap (an older wrapt, or a lowered cap) is
-        // brought back down rather than merely held steady.
+        // A file already over the cap (an older wrapt, or a limit lowered in
+        // config) is brought back down rather than merely held steady.
         assert_eq!(overflow(10, 3), 8);
+    }
+
+    #[test]
+    fn a_limit_of_one_keeps_exactly_the_new_entry() {
+        // The smallest the config allows: every write replaces the log.
+        assert_eq!(overflow(0, 1), 0);
+        assert_eq!(overflow(1, 1), 1);
+        assert_eq!(overflow(9, 1), 9);
+        // Zero is rejected by config validation, but must not discard the
+        // entry being recorded if it ever reaches here.
+        assert_eq!(overflow(0, 0), 0);
+        assert_eq!(overflow(5, 0), 5);
     }
 
     #[test]

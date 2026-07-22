@@ -69,6 +69,10 @@ pub struct Config {
     /// Two-letter country code for `fetch` to pull its mirror list from, for
     /// when geolocation guesses wrong.
     pub mirror_country: Option<String>,
+    /// How many transactions to keep in the history (default 1000). Worth
+    /// lowering on a machine that runs many transactions and never undoes
+    /// them, like a CI runner or a container build.
+    pub history_limit: Option<usize>,
 }
 
 impl Config {
@@ -111,6 +115,7 @@ impl Config {
             restart: over.restart.or(base.restart),
             keep_kernels: over.keep_kernels.or(base.keep_kernels),
             mirror_country: over.mirror_country.or(base.mirror_country),
+            history_limit: over.history_limit.or(base.history_limit),
         }
     }
 
@@ -171,6 +176,7 @@ pub fn describe(merged: &Config, system: &Config, user: &Config) -> Vec<(String,
         restart => "ask",
         never_restart => "(none)",
         keep_kernels => "2",
+        history_limit => "1000",
         mirror_country => "(geolocated)",
         repo => crate::selfupdate::DEFAULT_REPO,
         notify_updates => "false",
@@ -272,6 +278,11 @@ const TEMPLATE: &str = "\
 # How many kernels `clean --kernels` keeps, newest first. The running kernel
 # is always kept as well. Below 2 you have no fallback if a kernel won't boot.
 #keep_kernels = 2
+
+# How many transactions `wrapt history` keeps. Older ones are dropped as new
+# ones arrive. Worth lowering on a machine that runs many transactions and
+# never undoes them, like a CI runner.
+#history_limit = 1000
 
 # Two-letter country code for `fetch` to pull its mirror list from. Worth
 # setting if `fetch` finds only a handful of mirrors.
@@ -389,6 +400,14 @@ fn validate(cfg: &Config, path: &Path) -> anyhow::Result<()> {
     if cfg.keep_kernels == Some(0) {
         anyhow::bail!(
             "invalid config at {}: keep_kernels must be at least 1",
+            path.display()
+        );
+    }
+    // Zero would record a transaction and immediately discard it, leaving
+    // `undo` with nothing to undo — say so rather than silently doing that.
+    if cfg.history_limit == Some(0) {
+        anyhow::bail!(
+            "invalid config at {}: history_limit must be at least 1",
             path.display()
         );
     }
